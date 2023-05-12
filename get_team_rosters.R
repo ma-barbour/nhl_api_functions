@@ -8,11 +8,11 @@ library(tidyverse)
 library(jsonlite)
 library(lubridate)
 
-# FUNCTION: GET ALL TEAM ROSTERS ###############################################
+# FUNCTION: GET TEAM ROSTERS ###################################################
 
 # This function loops through each team's API endpoint and pulls expanded roster data
 
-get_all_team_rosters <- function() {
+get_team_rosters <- function() {
         
         # Create a vector of team_ids
         
@@ -70,5 +70,5 @@ get_all_team_rosters <- function() {
 
 # EXAMPLE ######################################################################
 
-current_nhl_roster_data <- get_all_team_rosters()
+current_nhl_roster_data <- get_team_rosters()
 
