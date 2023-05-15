@@ -50,11 +50,14 @@ get_game_logs <- function(player_id, season) {
                        opponent_link = link) %>%
                 unnest_wider(game)
         
-        # Add special teams assists data
+        # Add player data
         
         stats <- mutate(stats, player_id = player_id,
-                        player = player_name,
-                        assists_pp = powerPlayPoints - powerPlayGoals,
+                        player = player_name)
+        
+        # Add special teams assists data
+        
+        stats <- mutate(stats, assists_pp = powerPlayPoints - powerPlayGoals,
                         assists_sh = shortHandedPoints - shortHandedGoals)
         
         # Add even strength scoring data
