@@ -8,17 +8,17 @@ library(tidyverse)
 library(jsonlite)
 library(lubridate)
 
-# FUNCTION: GET GAME LOGS (COUNTS) #############################################
+# FUNCTION: GET GAME LOGS ######################################################
 
 # This function pulls a player's game logs for a specified season
 # SKATERS ONLY
 # REGULAR SEASON ONLY
 # Time-on-ice data is returned as seconds
-# You can use my get_team_rosters() function to find player_ids
+# Use my get_team_rosters() function to find player_ids
 # The season format is YEARYEAR (for example 20222023)
-# It is easy enough to wrap this function in a loop to pull data for multiple players at the same time (see EXAMPLE below)
+# Wrap this function in a loop to pull data for multiple players at the same time (see EXAMPLE below)
 
-get_game_logs_counts <- function(player_id, season) {
+get_game_logs <- function(player_id, season) {
         
         # Get the player's full name
         
@@ -118,11 +118,11 @@ get_game_logs_counts <- function(player_id, season) {
 
 # Pull Connor McDavid's game logs for the 2022-2023 season
 
-mcdavid_gl_2022_2023 <- get_game_logs_counts(8478402, 20222023)
+mcdavid_gl_2022_2023 <- get_game_logs(8478402, 20222023)
 
 # Wrap this function in a loop to pull game logs for multiple skaters
 # This example returns game logs for Connor McDavid and Leon Draisaitl
-# Simply create a vector of player_ids and then run them through the loop 
+# Create a vector of player_ids and then run them through the loop 
 
 player_ids <- c(8478402, 8477934)
 
@@ -130,7 +130,7 @@ temp_gl_list <- list()
 
 for (i in 1:length(player_ids)) {
         
-        game_logs <- get_game_logs_counts(player_ids[i], 20222023)
+        game_logs <- get_game_logs(player_ids[i], 20222023)
         
         temp_gl_list[[i]] <- game_logs
 }
