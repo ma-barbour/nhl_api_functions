@@ -92,7 +92,6 @@ get_game_logs <- function(player_id, season) {
                         assists_sh,
                         points_pp = powerPlayPoints,
                         points_sh = shortHandedPoints,
-                        shooting_pct = shotPct,
                         team_id, 
                         team_name, 
                         opponent_id, 
