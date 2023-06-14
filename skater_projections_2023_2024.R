@@ -1077,6 +1077,8 @@ raw_game_logs_data <- unique(raw_game_logs_data)
 # xG MODEL #####################################################################
 
 # This is a very simple xG model
+# It is mostly based on a cluster analysis of shot locations
+# Very close range shots receive special treatment
 
 ##### xG model: load xG model data if saved locally (below)
 
@@ -1216,6 +1218,51 @@ pbp_data <- pbp_data %>%
 pbp_data <- mutate(pbp_data, xg = ifelse(sa_distance >= 70 & goalie_id > 0, 0, goal_prob))
 
 pbp_data <- select(pbp_data, -goal_prob)
+
+# Final adjustment for extremely close shots
+# This will override the cluster xG values
+# Start by isolating shots within 3 feet of the middle of the net
+
+xg_override_data <- bind_rows(raw_pbp_data, raw_pbp_data_xg_data) %>%
+        filter(goalie_id > 0,
+               period != 5,
+               event_type == "GOAL" | event_type == "SHOT",
+               sa_angle <= 90,
+               sa_distance <= 3)
+
+# Round sa_distance and find the proportion of shot attempts -> goals
+
+xg_override_data$sa_distance <- round(xg_override_data$sa_distance)
+
+xg_override_summary <- xg_override_data %>%
+        group_by(sa_distance) %>%
+        summarize(shot_sa = n(),
+                  goals = sum(event_type == "GOAL")) %>%
+        mutate(xg = goals / shot_sa)
+
+# Add override data to play-by-play data
+
+pbp_data <- pbp_data %>%
+        mutate(xg = case_when(
+                goalie_id > 0 &
+                period != 5 &
+                (event_type == "GOAL" | event_type == "SHOT") &
+                sa_angle <= 90 &
+                sa_distance <= 3 & 
+                sa_distance >= 2.5 ~ as.numeric(xg_override_summary[3,4]),
+                goalie_id > 0 &
+                period != 5 &
+                (event_type == "GOAL" | event_type == "SHOT") &
+                sa_angle <= 90 &
+                sa_distance < 2.5 & 
+                sa_distance >= 1.5 ~ as.numeric(xg_override_summary[2,4]),
+                goalie_id > 0 &
+                period != 5 &
+                (event_type == "GOAL" | event_type == "SHOT") &
+                sa_angle <= 90 &
+                sa_distance < 1.5 & 
+                sa_distance >= 0 ~ as.numeric(xg_override_summary[1,4]),
+                TRUE ~ xg))
 
 # GET DATES FOR 160/80/40 TEAM GAMES ###########################################
 
@@ -1923,6 +1970,6 @@ your_google_sheet_url <- "" # <<< Paste your url between the quotation marks
 
 name_of_sheet <- "18_skaters_skater_projections"
 
-sheet_write(skater_projections, ss = your_google_sheet_url, sheet = name_of_sheet)
-
-
+sheet_write(skater_projections, 
+            ss = your_google_sheet_url, 
+            sheet = name_of_sheet)
