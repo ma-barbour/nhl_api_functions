@@ -936,6 +936,77 @@ convert_pred_to_rate_stats <- function(pred_data, rate_stats, stat, gp) {
         return(pred_data)
 }
 
+##### Helper functions: add_lr_xg_data(pbp_data, lr_model)
+
+add_lr_xg_data <- function(pbp_data, lr_model) {
+        
+        # Add temporary event_id for joining data
+        
+        return_data <- mutate(pbp_data, temp_id = paste0(game_id, event_id))
+        
+        working_data <- mutate(pbp_data, temp_id = paste0(game_id, event_id))
+        
+        # Remove empty nets
+        
+        working_data <- filter(working_data, goalie_id > 0)
+        
+        # Remove shootouts
+        
+        working_data <- filter(working_data, period != 5)
+        
+        # Filter for only shots and goals
+        
+        working_data <- filter(working_data, event_type == "SHOT" | event_type == "GOAL")
+        
+        # Remove long distance shots (effectively giving them 0% xG value)
+        
+        working_data <- filter(working_data, sa_distance < 70)
+        
+        # Select relevant data
+        
+        working_data <- select(working_data, temp_id, event_type, game_seconds, sa_distance, sa_angle, sa_dangerous, x_fixed, y_fixed)
+        
+        # Add column for juicy rebounds (based on time and y_fixed)
+        
+        working_data <- mutate(working_data, lag_gs = lag(game_seconds, n = 1))
+        working_data$lag_gs[is.na(working_data$lag_gs)] <- 0
+        
+        working_data <- mutate(working_data, lag_y = lag(y_fixed, n = 1))
+        working_data$lag_y[is.na(working_data$lag_y)] <- 0
+        
+        working_data <- mutate(working_data, diff_y = (abs(sqrt((y_fixed - lag_y)^2))))
+        
+        working_data <- mutate(working_data, juicy_rebound = ifelse(
+                game_seconds - lag_gs < 3 &
+                        diff_y > 4,
+                1,
+                0))
+        
+        # Conform sa_dangerous data to logistic regression data
+        
+        working_data$sa_dangerous <- ifelse(working_data$sa_dangerous == TRUE, 1, 0)
+        
+        # Predict xG 
+        
+        working_xg <- lr_model %>%
+                predict(working_data, type = "response")
+        
+        # Add xG to working data
+        
+        working_data$lr_xg <- working_xg
+        
+        # Isolate xG data and join to play-by-play data
+        
+        working_data <- select(working_data, temp_id, lr_xg)
+        
+        return_data <- return_data %>%
+                left_join(working_data, by = "temp_id")
+        
+        return_data <- select(return_data, -temp_id)
+        
+        return(return_data)
+}
+
 # GET THE RAW DATA #############################################################
 
 ##### Get the raw data: rosters
@@ -1076,7 +1147,7 @@ raw_game_logs_data <- unique(raw_game_logs_data)
 
 # xG MODEL #####################################################################
 
-# This is a very simple xG model
+# This is a simple xG model (there's also a logistic regression model below)
 # It is mostly based on a cluster analysis of shot locations
 # Very close range shots receive special treatment
 
@@ -1109,7 +1180,7 @@ training_data <- filter(training_data, period != 5)
 
 training_data <- filter(training_data, event_type == "SHOT" | event_type == "GOAL")
 
-# Remove long distance goals (effectively giving them 0% xG value)
+# Remove long distance shots (effectively giving them 0% xG value)
 
 training_data <- filter(training_data, sa_distance < 70)
 
@@ -1263,6 +1334,125 @@ pbp_data <- pbp_data %>%
                 sa_distance < 1.5 & 
                 sa_distance >= 0 ~ as.numeric(xg_override_summary[1,4]),
                 TRUE ~ xg))
+
+# LOGISTIC REGRESSION xG ADD-ON ################################################
+
+##### Logistic regression xG add-on: prepare the data
+
+lr_training_data <- bind_rows(raw_pbp_data, raw_pbp_data_xg_data)
+
+# Remove empty net goals
+
+lr_training_data <- filter(lr_training_data, goalie_id > 0)
+
+# Remove shootouts
+
+lr_training_data <- filter(lr_training_data, period != 5)
+
+# Filter for only shots and goals
+
+lr_training_data <- filter(lr_training_data, event_type == "SHOT" | event_type == "GOAL")
+
+# Remove long distance shots (effectively giving them 0% xG value)
+
+lr_training_data <- filter(lr_training_data, sa_distance < 70)
+
+# Select model data
+
+lr_training_data <- select(lr_training_data, event_type, game_seconds, sa_distance, sa_angle, sa_dangerous, x_fixed, y_fixed)
+
+# Add column for juicy rebounds (based on time and y_fixed)
+
+lr_training_data <- mutate(lr_training_data, lag_gs = lag(game_seconds, n = 1))
+lr_training_data$lag_gs[is.na(lr_training_data$lag_gs)] <- 0
+
+lr_training_data <- mutate(lr_training_data, lag_y = lag(y_fixed, n = 1))
+lr_training_data$lag_y[is.na(lr_training_data$lag_y)] <- 0
+
+lr_training_data <- mutate(lr_training_data, diff_y = (abs(sqrt((y_fixed - lag_y)^2))))
+
+lr_training_data <- mutate(lr_training_data, juicy_rebound = ifelse(
+        game_seconds - lag_gs < 3 &
+                diff_y > 4,
+        1,
+        0))
+
+# Prep the data for logistic regression
+
+lr_training_data <- select(lr_training_data, c(1,3:5,11))
+
+lr_training_data$sa_dangerous <- ifelse(lr_training_data$sa_dangerous == TRUE, 1, 0)
+
+lr_training_data$event_type <- ifelse(lr_training_data$event_type == "GOAL", 1, 0)
+
+##### Logistic regression xG add-on: model building and selection
+
+# Build the models
+
+lr_xg_model_1 <- glm(event_type ~., data = lr_training_data, family = binomial)
+lr_xg_model_2 <- glm(event_type ~ sa_distance + sa_angle + juicy_rebound, data = lr_training_data, family = binomial)
+
+summary(lr_xg_model_1)
+summary(lr_xg_model_2)
+
+# Test the models with Akaike information criterion (AIC)
+
+lr_xg_models <- list(lr_xg_model_1, lr_xg_model_2)
+lr_xg_models_names <- c("mod_1", "mod_2")
+
+lr_xg_models_test <- aictab(cand.set = lr_xg_models, modnames = lr_xg_models_names)
+
+# Based on this I will keep sa_dangerous in the model
+
+lr_model <- lr_xg_model_1
+
+##### Logistic regression xG add-on: add logistic regression xG data
+
+pbp_data <- add_lr_xg_data(pbp_data, lr_model)
+
+##### Logistic regression xG add-on: finalize xG data
+
+# Add zeros xG to logistic regression numbers for long shots
+
+pbp_data <- mutate(pbp_data, lr_xg = ifelse(xg == 0, 0, lr_xg))
+
+# Show differences between the models
+
+pbp_data <- mutate(pbp_data, xg_diff = lr_xg - xg)
+
+plot_xg <- ggplot(data = filter(pbp_data, xg > 0)) +
+        geom_point(aes(x = x_fixed, y = y_fixed, colour = xg)) + 
+        theme_minimal()
+#plot_xg
+
+plot_lr_xg <- ggplot(data = filter(pbp_data, lr_xg > 0)) +
+        geom_point(aes(x = x_fixed, y = y_fixed, colour = lr_xg)) + 
+        theme_minimal()
+#plot_lr_xg
+
+plot_xg_diff <- ggplot(data = filter(pbp_data, lr_xg > 0)) +
+        geom_point(aes(x = x_fixed, y = y_fixed, colour = xg_diff)) + 
+        theme_minimal()
+#plot_xg_diff
+
+# The cluster xG model was adjusted for very close shots and that difference shows up 
+# The cluster xG model also handles the weird angle shots (below the goal line) differently and I think that's a good thing to retain
+# Modify xG to retain very close shots and weird angles, blend everything else
+
+pbp_data <- mutate(pbp_data, rev_xg = case_when(
+        sa_distance <= 3 ~ xg,
+        sa_angle > 90 ~ xg,
+        TRUE ~ (xg * 0.5) + (lr_xg * 0.5)))
+
+pbp_data <- mutate(pbp_data, xg_rev_diff = rev_xg - xg)
+pbp_data <- mutate(pbp_data, lr_xg_rev_diff = rev_xg - lr_xg)
+
+# Finalize xG
+
+pbp_data <- select(pbp_data, -xg, -lr_xg, -xg_diff, -xg_rev_diff, -lr_xg_rev_diff)
+
+pbp_data <- rename(pbp_data, "xg" = rev_xg)
+
 
 # GET DATES FOR 160/80/40 TEAM GAMES ###########################################
 
