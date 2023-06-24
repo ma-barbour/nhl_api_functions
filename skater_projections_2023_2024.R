@@ -1168,17 +1168,31 @@ add_xg_data <- function(training_data, pbp_data) {
         xgb_test <- xgb.DMatrix(data = test_variables, 
                                 label = test_goals)
         
-        # The XGBoost Model
+        # Get nrounds parameter
+        
+        set.seed(28)
         
         watchlist <- list(train = xgb_train, 
                           test = xgb_test)
         
+        cv <- xgb.cv(params = list(objective = "binary:logistic", 
+                                   eval_metric = "auc",
+                                   max.depth = 6),
+                     data = xgb_train,
+                     watchlist = watchlist,
+                     nrounds = 100,
+                     nfold = 5, 
+                     early_stopping_rounds = 20)
+        
+        # The XGBoost Model
+        
         final_xg_model <- xgb.train(data = xgb_train,
-                                  watchlist = watchlist,
-                                  nrounds = 28,
-                                  max.depth = 6, 
-                                  objective = "binary:logistic",
-                                  verbose = 0)
+                                    watchlist = watchlist,
+                                    nrounds = cv$best_iteration,
+                                    max.depth = 6, 
+                                    objective = "binary:logistic",
+                                    eval_metric = "auc",
+                                    verbose = 0)
         
         # Conform play-by-play data to xg_model data 
         # Add a temporary event_id for joining data
