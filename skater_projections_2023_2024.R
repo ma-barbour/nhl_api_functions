@@ -14,7 +14,6 @@
 # NHL API Functions
 # Helper Functions
 # Get The Raw Data
-# xG Model
 # Add xG To Play-By-Play Data
 # Get Dates For 160/80/40 Team Games
 # Process Game Logs
@@ -37,6 +36,10 @@
 #install.packages("ClusterR")
 #install.packages("stringr")
 #install.packages("AICcmodavg")
+#install.packages("caTools")
+#install.packages("xgboost")
+#install.packages("pROC")
+#install.packages("ROCR")
 
 library(tidyverse)
 library(jsonlite)
@@ -45,6 +48,10 @@ library(parsedate)
 library(ClusterR)
 library(stringr)
 library(AICcmodavg)
+library(caTools)
+library(xgboost)
+library(pROC)
+library(ROCR)
 
 # NHL API FUNCTIONS ############################################################
 
@@ -209,6 +216,17 @@ get_play_by_play_data <- function(game_id) {
                        goalie = player)
         goalie_ids <- goalies$goalie_id
         
+        skaters <- filter(player_data, position != "Goalie") %>%
+                mutate(position = ifelse(position == "Forward",
+                                         "F",
+                                         "D"))
+        
+        forwards <- filter(skaters, position == "F")
+        forwards_ids <- forwards$player_id
+        
+        defensemen <- filter(skaters, position == "D")
+        defensemen_ids <- defensemen$player_id
+        
         # Pull play-by-play data (events and coordinates)
         # Event player data is omitted here and is dealt with below
         
@@ -271,6 +289,7 @@ get_play_by_play_data <- function(game_id) {
                                                 "x", 
                                                 "y")))
         
+        
         # Rename some of the columns
         
         col_names <- c(event_id = "eventIdx", 
@@ -311,7 +330,7 @@ get_play_by_play_data <- function(game_id) {
                         event_team == away_team & median_sa > 0 ~ 0 - y,
                         event_team == away_team & median_sa < 0 ~ y))
         
-        # Add shot attempt distance from middle of the net (Euclidean distance)
+        # Add shot attempt distance from middle of the net (Euclidean distance formula)
         
         all_plays <- mutate(all_plays, sa_distance = case_when(
                 event_team == home_team & event_type %in% shot_attempts ~ round(abs(sqrt((x_fixed - 89)^2 + (y_fixed)^2)), 1),
@@ -380,14 +399,26 @@ get_play_by_play_data <- function(game_id) {
         for (i in 1:length_cols) {
                 
                 players <- mutate(players, goalie_id = 
-                        ifelse(get(paste0("event_player_", i+1, "_id")) %in% goalie_ids & get(paste0("event_player_", i+1, "_type")) != "Assist", 
-                        get((paste0("event_player_", i+1, "_id"))), 
-                        goalie_id))
+                                          ifelse(get(paste0("event_player_", i+1, "_id")) %in% goalie_ids & get(paste0("event_player_", i+1, "_type")) != "Assist", 
+                                                 get((paste0("event_player_", i+1, "_id"))), 
+                                                 goalie_id))
         }
         
         # Add the names of the goalies
         
         players <- left_join(players, goalies, by = "goalie_id")
+        
+        # Add skater position data for event_player_1
+        
+        players <- mutate(players, event_player_1_position = case_when(
+                event_player_1_id %in% forwards_ids ~ "F",
+                event_player_1_id %in% defensemen_ids ~ "D",
+                event_player_1_id %in% goalie_ids ~ "G",
+                TRUE ~ NA))
+        
+        # Rearrange columns
+        
+        players <- select(players, c(1:3, length(players), 4:(length(players) -1)))
         
         # Add the event players to the play-by-play data
         
@@ -397,12 +428,32 @@ get_play_by_play_data <- function(game_id) {
         # Add a warning for long distance goals scored against a goalie
         # Potential x-coordinate error in the NHL data
         # Errors happen. If you pull all the data for the 2021-2022 and 2022-2023 seasons you will find 18 instances where this check returns a "TRUE"
-        # Note: not every instance will be an error - bad goals also happen.
         
-        pbp_data <- mutate(pbp_data, check_x_error = ifelse(event_type == "GOAL" & sa_distance > 89 & goalie_id > 0, TRUE, FALSE))
+        pbp_data <- mutate(pbp_data, goal_x_error = ifelse(
+                event_type == "GOAL" & 
+                        sa_distance > 89 & 
+                        goalie_id > 0, 
+                TRUE, 
+                FALSE))
+        
+        # Add a similar warning for shots
+        
+        pbp_data <- mutate(pbp_data, shot_x_error = ifelse(
+                (event_type == "SHOT" | event_type == "MISSED_SHOT") & 
+                        sa_distance > 89 & 
+                        (secondary_type == "Tip-In" |
+                                 secondary_type == "Wrap-around" |
+                                 secondary_type == "Deflected" |
+                                 secondary_type == "Poke" |
+                                 secondary_type == "Batted" |
+                                 secondary_type == "Between Legs" |
+                                 secondary_type == "Cradle"),
+                TRUE, 
+                FALSE))
         
         return(pbp_data)
 }
+
 
 ##### NHL API Functions: get_game_logs(player_id, season)
 
@@ -936,71 +987,373 @@ convert_pred_to_rate_stats <- function(pred_data, rate_stats, stat, gp) {
         return(pred_data)
 }
 
-##### Helper functions: add_lr_xg_data(pbp_data, lr_model)
+##### Helper functions: add_xg_data(training_data, pbp_data)
 
-add_lr_xg_data <- function(pbp_data, lr_model) {
+add_xg_data <- function(training_data, pbp_data) {
         
-        # Add temporary event_id for joining data
+        # Build an xG model using the training data
+        
+        working_data <- training_data
+        
+        # Change event_player_1_position from F/D to 1/0
+        
+        working_data$event_player_1_position <- ifelse(
+                working_data$event_player_1_position == "F",
+                1,
+                0)
+        
+        # Add prior event outside o-zone
+        
+        working_data <- working_data %>%
+                group_by(game_id, period) %>%
+                mutate(pe_x_ozone = case_when(
+                        event_team == home_team &
+                                lag(x_fixed) < 25 ~ 1,
+                        event_team == away_team & 
+                                lag(x_fixed) > -25 ~ 1,
+                        TRUE ~ 0)) %>%
+                ungroup()
+        
+        # Add prior event giveaway / takeaway
+        
+        working_data <- working_data %>%
+                group_by(game_id, period) %>%
+                mutate(turnover = case_when(
+                        event_team == lag(event_team) &
+                                game_seconds - lag(game_seconds) < 6 &
+                                lag(event_type ) == "TAKEAWAY" ~ 1,
+                        event_team != lag(event_team) &
+                                game_seconds - lag(game_seconds) < 6 &
+                                lag(event_type ) == "GIVEAWAY" ~ 1,
+                        TRUE ~ 0)) %>%
+                ungroup()
+        
+        # Add elapsed time from prior event
+        
+        working_data <- working_data %>%
+                group_by(game_id, period) %>%
+                mutate(elapsed_time = game_seconds - lag(game_seconds)) %>%
+                ungroup()
+        
+        # Filter out non-shots, empty nets, shootout
+        
+        working_data <- working_data %>%
+                filter(event_type == "SHOT" | 
+                               event_type == "GOAL",
+                       goalie_id > 0,
+                       period < 5)
+        
+        # Add juicy rebounds
+        
+        working_data <- working_data %>%
+                mutate(lag_gs = lag(game_seconds, n = 1))
+        working_data$lag_gs[is.na(working_data$lag_gs)] <- 0
+        
+        working_data <- working_data %>%
+                mutate(lag_y = lag(y_fixed, n = 1))
+        working_data$lag_y[is.na(working_data$lag_y)] <- 0
+        
+        working_data <- working_data %>%
+                mutate(diff_y = (abs(sqrt((y_fixed - lag_y)^2))))
+        
+        working_data <- working_data %>%
+                mutate(juicy_rebound = ifelse(
+                        game_seconds - lag_gs < 3 & 
+                                diff_y > 9 &
+                                sa_distance <= 30 &
+                                sa_angle < 90,
+                        1,
+                        0))
+        
+        # Add rushes occurring after an opposing shot
+        
+        working_data <- working_data %>%
+                mutate(lag_x = lag(x_fixed, n = 1))
+        working_data$lag_x[is.na(working_data$lag_x)] <- 0
+        
+        working_data <- working_data %>%
+                mutate(diff_x = (abs(sqrt((x_fixed - lag_x)^2))))
+        
+        working_data <- working_data %>%
+                mutate(after_shot_rush = ifelse(
+                        game_seconds - lag_gs < 7 &
+                                period == lag(period, n =1) &
+                                diff_x > 60 &
+                                sa_distance < 40 &
+                                sa_angle < 90,
+                        1,
+                        0)) 
+        
+        # Add column for close shot attempts from below the goal line
+        
+        working_data <- working_data %>%
+                mutate(goal_line = ifelse(
+                        sa_angle > 90 &
+                                sa_distance < 12, 
+                        1,
+                        0))
+        
+        # Add column for shot pressure
+        
+        working_data <- working_data %>%
+                mutate(shot_pressure = ifelse(
+                        event_team == lag(event_team, n = 1) &
+                                event_team == lag(event_team, n = 2) &
+                                event_team == lag(event_team, n = 3) &
+                                period == lag(period, n = 3),
+                        1,
+                        0))
+        working_data$shot_pressure[is.na(working_data$shot_pressure)] <- 0
+        
+        # Change goals/shots to 1/0
+        
+        working_data$event_type <- ifelse(
+                working_data$event_type == "GOAL",
+                1,
+                0)
+        
+        # Change shot type to wrist / other
+        
+        working_data$secondary_type <- ifelse(
+                working_data$secondary_type == "Wrist Shot",
+                1,
+                0)
+        working_data$secondary_type[is.na(working_data$secondary_type)] <- 0
+        
+        # Select the training data
+        
+        working_data_shrunk <- working_data %>%
+                select(event_type,
+                       secondary_type,
+                       sa_distance,
+                       sa_angle,
+                       juicy_rebound,
+                       after_shot_rush,
+                       goal_line,
+                       shot_pressure,
+                       pe_x_ozone,
+                       turnover,
+                       elapsed_time,
+                       event_player_1_position)
+        
+        # Eliminate cases where there are missing coordinates
+        
+        working_data_shrunk <- working_data_shrunk %>%
+                filter(sa_distance >= 0)
+        
+        train_split <- sample.split(Y = working_data_shrunk$event_type, 
+                                    SplitRatio = 0.7)
+        
+        train_data <- working_data_shrunk[train_split,]
+        
+        test_data <- working_data_shrunk[!train_split,]
+        
+        # Prep training data
+        
+        train_variables <- data.matrix(train_data[, -1])
+        
+        train_goals <- data.matrix(train_data[, 1])
+        
+        # Prep testing data
+        
+        test_variables <- data.matrix(test_data[, -1])
+        
+        test_goals <- data.matrix(test_data[, 1])
+        
+        # Final training and testing data sets
+        
+        xgb_train <- xgb.DMatrix(data = train_variables, 
+                                 label = train_goals)
+        
+        xgb_test <- xgb.DMatrix(data = test_variables, 
+                                label = test_goals)
+        
+        # The XGBoost Model
+        
+        watchlist <- list(train = xgb_train, 
+                          test = xgb_test)
+        
+        final_xg_model <- xgboost(data = xgb_train,
+                                  nrounds = 28,
+                                  max.depth = 6, 
+                                  objective = "binary:logistic",
+                                  verbose = 0)
+        
+        # Conform play-by-play data to xg_model data 
+        # Add a temporary event_id for joining data
         
         return_data <- mutate(pbp_data, temp_id = paste0(game_id, event_id))
         
-        working_data <- mutate(pbp_data, temp_id = paste0(game_id, event_id))
+        pbp_prediction_data <- mutate(pbp_data, temp_id = paste0(game_id, event_id))
         
-        # Remove empty nets
-        
-        working_data <- filter(working_data, goalie_id > 0)
-        
-        # Remove shootouts
-        
-        working_data <- filter(working_data, period != 5)
-        
-        # Filter for only shots and goals
-        
-        working_data <- filter(working_data, event_type == "SHOT" | event_type == "GOAL")
-        
-        # Remove long distance shots (effectively giving them 0% xG value)
-        
-        working_data <- filter(working_data, sa_distance < 70)
-        
-        # Select relevant data
-        
-        working_data <- select(working_data, temp_id, event_type, game_seconds, sa_distance, sa_angle, sa_dangerous, x_fixed, y_fixed)
-        
-        # Add column for juicy rebounds (based on time and y_fixed)
-        
-        working_data <- mutate(working_data, lag_gs = lag(game_seconds, n = 1))
-        working_data$lag_gs[is.na(working_data$lag_gs)] <- 0
-        
-        working_data <- mutate(working_data, lag_y = lag(y_fixed, n = 1))
-        working_data$lag_y[is.na(working_data$lag_y)] <- 0
-        
-        working_data <- mutate(working_data, diff_y = (abs(sqrt((y_fixed - lag_y)^2))))
-        
-        working_data <- mutate(working_data, juicy_rebound = ifelse(
-                game_seconds - lag_gs < 3 &
-                        diff_y > 4,
+        pbp_prediction_data$event_player_1_position <- ifelse(
+                pbp_prediction_data$event_player_1_position == "F",
                 1,
-                0))
+                0)
         
-        # Conform sa_dangerous data to logistic regression data
+        # Add prior event outside o-zone
         
-        working_data$sa_dangerous <- ifelse(working_data$sa_dangerous == TRUE, 1, 0)
+        pbp_prediction_data <- pbp_prediction_data %>%
+                group_by(game_id, period) %>%
+                mutate(pe_x_ozone = case_when(
+                        event_team == home_team &
+                                lag(x_fixed) < 25 ~ 1,
+                        event_team == away_team & 
+                                lag(x_fixed) > -25 ~ 1,
+                        TRUE ~ 0)) %>%
+                ungroup()
         
-        # Predict xG 
+        # Add prior event giveaway / takeaway
         
-        working_xg <- lr_model %>%
-                predict(working_data, type = "response")
+        pbp_prediction_data<- pbp_prediction_data %>%
+                group_by(game_id, period) %>%
+                mutate(turnover = case_when(
+                        event_team == lag(event_team) &
+                                game_seconds - lag(game_seconds) < 6 &
+                                lag(event_type ) == "TAKEAWAY" ~ 1,
+                        event_team != lag(event_team) &
+                                game_seconds - lag(game_seconds) < 6 &
+                                lag(event_type ) == "GIVEAWAY" ~ 1,
+                        TRUE ~ 0)) %>%
+                ungroup()
         
-        # Add xG to working data
+        # Add elapsed time from prior event
         
-        working_data$lr_xg <- working_xg
+        pbp_prediction_data <- pbp_prediction_data %>%
+                group_by(game_id, period) %>%
+                mutate(elapsed_time = game_seconds - lag(game_seconds)) %>%
+                ungroup()
         
-        # Isolate xG data and join to play-by-play data
+        # Filter out non-shots, empty nets, shootout
         
-        working_data <- select(working_data, temp_id, lr_xg)
+        pbp_prediction_data <- pbp_prediction_data %>%
+                filter(event_type == "SHOT" | 
+                               event_type == "GOAL",
+                       goalie_id > 0,
+                       period < 5)
+        
+        # Add juicy rebounds
+        
+        pbp_prediction_data <- pbp_prediction_data %>%
+                mutate(lag_gs = lag(game_seconds, n = 1))
+        pbp_prediction_data$lag_gs[is.na(pbp_prediction_data$lag_gs)] <- 0
+        
+        pbp_prediction_data <- pbp_prediction_data %>%
+                mutate(lag_y = lag(y_fixed, n = 1))
+        pbp_prediction_data$lag_y[is.na(pbp_prediction_data$lag_y)] <- 0
+        
+        pbp_prediction_data <- pbp_prediction_data %>%
+                mutate(diff_y = (abs(sqrt((y_fixed - lag_y)^2))))
+        
+        pbp_prediction_data <- pbp_prediction_data %>%
+                mutate(juicy_rebound = ifelse(
+                        game_seconds - lag_gs < 3 & 
+                                diff_y > 9 &
+                                sa_distance <= 30 &
+                                sa_angle < 90,
+                        1,
+                        0))
+        
+        # Add rushes occurring after an opposing shot
+        
+        pbp_prediction_data <- pbp_prediction_data %>%
+                mutate(lag_x = lag(x_fixed, n = 1))
+        pbp_prediction_data$lag_x[is.na(pbp_prediction_data$lag_x)] <- 0
+        
+        pbp_prediction_data <- pbp_prediction_data %>%
+                mutate(diff_x = (abs(sqrt((x_fixed - lag_x)^2))))
+        
+        pbp_prediction_data <- pbp_prediction_data %>%
+                mutate(after_shot_rush = ifelse(
+                        game_seconds - lag_gs < 7 &
+                                period == lag(period, n =1) &
+                                diff_x > 60 &
+                                sa_distance < 40 &
+                                sa_angle < 90,
+                        1,
+                        0)) 
+        
+        # Add column for close shot attempts from below the goal line
+        
+        pbp_prediction_data <- pbp_prediction_data %>%
+                mutate(goal_line = ifelse(
+                        sa_angle > 90 &
+                                sa_distance < 12, 
+                        1,
+                        0))
+        
+        # Add column for shot pressure
+        
+        pbp_prediction_data <- pbp_prediction_data %>%
+                mutate(shot_pressure = ifelse(
+                        event_team == lag(event_team, n = 1) &
+                                event_team == lag(event_team, n = 2) &
+                                event_team == lag(event_team, n = 3) &
+                                period == lag(period, n = 3),
+                        1,
+                        0))
+        pbp_prediction_data$shot_pressure[is.na(pbp_prediction_data$shot_pressure)] <- 0
+        
+        # Change goals/shots to 1/0
+        
+        pbp_prediction_data$event_type <- ifelse(
+                pbp_prediction_data$event_type == "GOAL",
+                1,
+                0)
+        
+        # Change shot type to wrist / other
+        
+        pbp_prediction_data$secondary_type <- ifelse(
+                pbp_prediction_data$secondary_type == "Wrist Shot",
+                1,
+                0)
+        pbp_prediction_data$secondary_type[is.na(pbp_prediction_data$secondary_type)] <- 0
+        
+        # Select the necessary prediction data
+        
+        pbp_prediction_data_shrunk <- pbp_prediction_data %>%
+                select(event_type,
+                       secondary_type,
+                       sa_distance,
+                       sa_angle,
+                       juicy_rebound,
+                       after_shot_rush,
+                       goal_line,
+                       shot_pressure,
+                       pe_x_ozone,
+                       turnover,
+                       elapsed_time,
+                       event_player_1_position)
+        
+        # Put shrunk data in matrix form
+        
+        variables_matrix <- data.matrix(pbp_prediction_data_shrunk[, -1])
+        
+        goals_matrix <- data.matrix(pbp_prediction_data_shrunk[, 1])
+        
+        pbp_prediction_data_matrix <- xgb.DMatrix(data = variables_matrix, 
+                                                  label = goals_matrix)
+        
+        # Make the predictions
+        
+        predicted_xg <- predict(final_xg_model, pbp_prediction_data_matrix)
+        
+        # Add the predictions to the play-by_play prediction data
+        
+        pbp_prediction_data$xg <- predicted_xg
+        
+        # Isolate temp_id and xg for join back to main data
+        
+        pbp_prediction_data <- select(pbp_prediction_data,
+                                      temp_id,
+                                      xg)
+        
+        # Add xg to return data
         
         return_data <- return_data %>%
-                left_join(working_data, by = "temp_id")
+                left_join(pbp_prediction_data, by = "temp_id")
+        
+        # Remove temp-id
         
         return_data <- select(return_data, -temp_id)
         
@@ -1050,9 +1403,10 @@ schedule <- schedule %>%
 
 ##### Get the raw data: play-by-play
 
-# Load the data after saving locally (below) and skip running these loops
+# Load the data after saving locally (below) 
 # raw_pbp_data <- read_rds("raw_pbp_data_2021_2023.RDS")
 # raw_pbp_data_xg_data <- read_rds("raw_pbp_data_2018_2020.RDS")
+# Now skip these loops and go to "Get the raw data: remove (potential) errors in raw play-by-play data"
 
 # WARNING: THIS CODE TAKES SOME TIME TO RUN
 
@@ -1096,10 +1450,26 @@ raw_pbp_data_xg_data <- bind_rows(temp_pbp_list) %>%
 # Save data locally after running the code
 # write_rds(raw_pbp_data_xg_data, "raw_pbp_data_2018_2020.RDS")
 
+##### Get the raw data: remove (potential) errors in raw play-by-play data
+
+raw_pbp_data$goal_x_error[is.na(raw_pbp_data$goal_x_error)] <- FALSE
+raw_pbp_data$shot_x_error[is.na(raw_pbp_data$shot_x_error)] <- FALSE
+raw_pbp_data_xg_data$goal_x_error[is.na(raw_pbp_data_xg_data$goal_x_error)] <- FALSE
+raw_pbp_data_xg_data$shot_x_error[is.na(raw_pbp_data_xg_data$shot_x_error)] <- FALSE
+
+raw_pbp_data <- raw_pbp_data %>%
+        filter(goal_x_error == FALSE,
+               shot_x_error == FALSE)
+
+raw_pbp_data_xg_data <- raw_pbp_data_xg_data %>%
+        filter(goal_x_error == FALSE,
+               shot_x_error == FALSE)
+
 ##### Get the raw data: game logs
 
-# Load the data after saving locally (below) and skip running these loops
+# Load the data after saving locally (below) 
 # raw_game_logs_data <- read_rds("raw_game_logs_data_2021_2023.RDS")
+# Now skip to "ADD xGOALS TO PLAY-BY-PLAY DATA" 
 
 # WARNING: THIS CODE TAKES SOME TIME TO RUN
 
@@ -1145,314 +1515,15 @@ raw_game_logs_data <- unique(raw_game_logs_data)
 # Save data locally after running the code
 # write_rds(raw_game_logs_data, "raw_game_logs_data_2021_2023.RDS")
 
-# xG MODEL #####################################################################
+# ADD xGOALS TO PLAY-BY-PLAY DATA ##############################################
 
-# This is a simple xG model (there's also a logistic regression model below)
-# It is mostly based on a cluster analysis of shot locations
-# Very close range shots receive special treatment
+# Expected goals are computed with an XGBoost model (logistic regression)
+# The model is found in the helper function above
 
-##### xG model: load xG model data if saved locally (below)
+training_data <- bind_rows(raw_pbp_data, raw_pbp_data_xg_data) %>%
+        arrange(desc(date))
 
-# cluster_goal_prob <- read.csv("cluster_goal_prob.csv")
-# cluster_goal_prob <- cluster_goal_prob[,-1]
-# centers <- as.matrix(read.csv("cluster_centers.csv"))
-# centers <- centers[,-1]
-
-# Now skip to Add xG below
-
-##### xG model: generate xG model data if NOT saved locally
-
-training_data <- bind_rows(raw_pbp_data, raw_pbp_data_xg_data)
-
-# Select the necessary variables
-
-training_data <- select(training_data, event_type, period, sa_distance, sa_angle, goalie_id)
-
-# Remove empty net goals
-
-training_data <- filter(training_data, goalie_id > 0)
-
-# Remove shootouts
-
-training_data <- filter(training_data, period != 5)
-
-# Filter for only shots and goals
-
-training_data <- filter(training_data, event_type == "SHOT" | event_type == "GOAL")
-
-# Remove long distance shots (effectively giving them 0% xG value)
-
-training_data <- filter(training_data, sa_distance < 70)
-
-# Select Kmeans cluster data (shot distance + shot angle)
-
-training_cluster_data <- select(training_data, sa_distance, sa_angle)
-
-# Generate shot location clusters (200)
-# WARNING: THIS CODE TAKES SOME TIME TO RUN 
-
-clusters <- kmeans(training_cluster_data, 200, nstart = 500, iter.max = 15)
-
-# Assign clusters to the training data
-
-training_data$cluster <- clusters$cluster
-
-# Compute goal proportions for each cluster
-
-cluster_shot_attempts <- training_data %>%
-        group_by(cluster) %>%
-        summarise(sa_count = n())
-
-cluster_goals <- training_data %>%
-        filter(event_type == "GOAL") %>%
-        group_by(cluster) %>%
-        summarise(goal_count = n())
-
-training_data <- training_data %>%
-        left_join(cluster_shot_attempts, by = "cluster") %>%
-        left_join(cluster_goals, by = "cluster")
-
-training_data$goal_count[is.na(training_data$goal_count)] <- 0
-
-training_data <- mutate(training_data, goal_prob = goal_count / sa_count)
-
-# Isolate the data needed to add xG to projections data 
-
-cluster_goal_prob <- select(training_data, c("cluster", "goal_prob")) %>%
-        group_by(cluster, goal_prob) %>%
-        summarise()
-
-centers <- clusters$centers
-
-# Save data locally after running the code
-# write.csv(cluster_goal_prob, "cluster_goal_prob.csv")
-# write.csv(centers, "cluster_centers.csv")
-
-# ADD xG TO PLAY-BY-PLAY DATA ##################################################
-
-##### Add xG: match skater projections data to xG training data
-
-# Add a temp_id in order to add xG data
-
-pbp_data <- mutate(raw_pbp_data, temp_id = paste0(game_id, event_id))
-
-# Create working data for the xG analysis
-
-working_data <- pbp_data
-
-# Remove empty net goals
-
-working_data <- filter(working_data, goalie_id > 0)
-
-# Remove shootouts
-
-working_data <- filter(working_data, period != 5)
-
-# Filter for only shots and goals
-
-working_data <- filter(working_data, event_type == "GOAL" | event_type == "SHOT")
-
-# Filter for shot distance under 70 feet
-
-working_data <- filter(working_data, sa_distance < 70)
-
-working_cluster_data <- select(working_data, sa_distance, sa_angle)
-
-##### Add xG: perform cluster analysis on working data
-
-# Determine clusters for working data
-
-clusters_working_data <- predict_KMeans(working_cluster_data, centers)
-
-# Assign clusters to working data
-
-working_data$cluster <- clusters_working_data
-
-# Assign goal probability to clusters
-
-working_data <- left_join(working_data, cluster_goal_prob, by = "cluster")
-
-##### Add xG: join xG data to play-by-play data
-
-# Isolate xG data for join
-
-working_data <- select(working_data, temp_id, goal_prob)
-
-# Add xG data to play-by-play data
-
-pbp_data <- pbp_data %>%
-        left_join(working_data, by = "temp_id") %>%
-        select(-temp_id)
-
-# Assign 0 xG value to shots >= to 70
-
-pbp_data <- mutate(pbp_data, xg = ifelse(sa_distance >= 70 & goalie_id > 0, 0, goal_prob))
-
-pbp_data <- select(pbp_data, -goal_prob)
-
-# Final adjustment for extremely close shots
-# This will override the cluster xG values
-# Start by isolating shots within 3 feet of the middle of the net
-
-xg_override_data <- bind_rows(raw_pbp_data, raw_pbp_data_xg_data) %>%
-        filter(goalie_id > 0,
-               period != 5,
-               event_type == "GOAL" | event_type == "SHOT",
-               sa_angle <= 90,
-               sa_distance <= 3)
-
-# Round sa_distance and find the proportion of shot attempts -> goals
-
-xg_override_data$sa_distance <- round(xg_override_data$sa_distance)
-
-xg_override_summary <- xg_override_data %>%
-        group_by(sa_distance) %>%
-        summarize(shot_sa = n(),
-                  goals = sum(event_type == "GOAL")) %>%
-        mutate(xg = goals / shot_sa)
-
-# Add override data to play-by-play data
-
-pbp_data <- pbp_data %>%
-        mutate(xg = case_when(
-                goalie_id > 0 &
-                period != 5 &
-                (event_type == "GOAL" | event_type == "SHOT") &
-                sa_angle <= 90 &
-                sa_distance <= 3 & 
-                sa_distance >= 2.5 ~ as.numeric(xg_override_summary[3,4]),
-                goalie_id > 0 &
-                period != 5 &
-                (event_type == "GOAL" | event_type == "SHOT") &
-                sa_angle <= 90 &
-                sa_distance < 2.5 & 
-                sa_distance >= 1.5 ~ as.numeric(xg_override_summary[2,4]),
-                goalie_id > 0 &
-                period != 5 &
-                (event_type == "GOAL" | event_type == "SHOT") &
-                sa_angle <= 90 &
-                sa_distance < 1.5 & 
-                sa_distance >= 0 ~ as.numeric(xg_override_summary[1,4]),
-                TRUE ~ xg))
-
-# LOGISTIC REGRESSION xG ADD-ON ################################################
-
-##### Logistic regression xG add-on: prepare the data
-
-lr_training_data <- bind_rows(raw_pbp_data, raw_pbp_data_xg_data)
-
-# Remove empty net goals
-
-lr_training_data <- filter(lr_training_data, goalie_id > 0)
-
-# Remove shootouts
-
-lr_training_data <- filter(lr_training_data, period != 5)
-
-# Filter for only shots and goals
-
-lr_training_data <- filter(lr_training_data, event_type == "SHOT" | event_type == "GOAL")
-
-# Remove long distance shots (effectively giving them 0% xG value)
-
-lr_training_data <- filter(lr_training_data, sa_distance < 70)
-
-# Select model data
-
-lr_training_data <- select(lr_training_data, event_type, game_seconds, sa_distance, sa_angle, sa_dangerous, x_fixed, y_fixed)
-
-# Add column for juicy rebounds (based on time and y_fixed)
-
-lr_training_data <- mutate(lr_training_data, lag_gs = lag(game_seconds, n = 1))
-lr_training_data$lag_gs[is.na(lr_training_data$lag_gs)] <- 0
-
-lr_training_data <- mutate(lr_training_data, lag_y = lag(y_fixed, n = 1))
-lr_training_data$lag_y[is.na(lr_training_data$lag_y)] <- 0
-
-lr_training_data <- mutate(lr_training_data, diff_y = (abs(sqrt((y_fixed - lag_y)^2))))
-
-lr_training_data <- mutate(lr_training_data, juicy_rebound = ifelse(
-        game_seconds - lag_gs < 3 &
-                diff_y > 4,
-        1,
-        0))
-
-# Prep the data for logistic regression
-
-lr_training_data <- select(lr_training_data, c(1,3:5,11))
-
-lr_training_data$sa_dangerous <- ifelse(lr_training_data$sa_dangerous == TRUE, 1, 0)
-
-lr_training_data$event_type <- ifelse(lr_training_data$event_type == "GOAL", 1, 0)
-
-##### Logistic regression xG add-on: model building and selection
-
-# Build the models
-
-lr_xg_model_1 <- glm(event_type ~., data = lr_training_data, family = binomial)
-lr_xg_model_2 <- glm(event_type ~ sa_distance + sa_angle + juicy_rebound, data = lr_training_data, family = binomial)
-
-summary(lr_xg_model_1)
-summary(lr_xg_model_2)
-
-# Test the models with Akaike information criterion (AIC)
-
-lr_xg_models <- list(lr_xg_model_1, lr_xg_model_2)
-lr_xg_models_names <- c("mod_1", "mod_2")
-
-lr_xg_models_test <- aictab(cand.set = lr_xg_models, modnames = lr_xg_models_names)
-
-# Based on this I will keep sa_dangerous in the model
-
-lr_model <- lr_xg_model_1
-
-##### Logistic regression xG add-on: add logistic regression xG data
-
-pbp_data <- add_lr_xg_data(pbp_data, lr_model)
-
-##### Logistic regression xG add-on: finalize xG data
-
-# Add zeros xG to logistic regression numbers for long shots
-
-pbp_data <- mutate(pbp_data, lr_xg = ifelse(xg == 0, 0, lr_xg))
-
-# Show differences between the models
-
-pbp_data <- mutate(pbp_data, xg_diff = lr_xg - xg)
-
-plot_xg <- ggplot(data = filter(pbp_data, xg > 0)) +
-        geom_point(aes(x = x_fixed, y = y_fixed, colour = xg)) + 
-        theme_minimal()
-#plot_xg
-
-plot_lr_xg <- ggplot(data = filter(pbp_data, lr_xg > 0)) +
-        geom_point(aes(x = x_fixed, y = y_fixed, colour = lr_xg)) + 
-        theme_minimal()
-#plot_lr_xg
-
-plot_xg_diff <- ggplot(data = filter(pbp_data, lr_xg > 0)) +
-        geom_point(aes(x = x_fixed, y = y_fixed, colour = xg_diff)) + 
-        theme_minimal()
-#plot_xg_diff
-
-# The cluster xG model was adjusted for very close shots and that difference shows up 
-# The cluster xG model also handles the weird angle shots (below the goal line) differently and I think that's a good thing to retain
-# Modify xG to retain very close shots and weird angles, blend everything else
-
-pbp_data <- mutate(pbp_data, rev_xg = case_when(
-        sa_distance <= 3 ~ xg,
-        sa_angle > 90 ~ xg,
-        TRUE ~ (xg * 0.5) + (lr_xg * 0.5)))
-
-pbp_data <- mutate(pbp_data, xg_rev_diff = rev_xg - xg)
-pbp_data <- mutate(pbp_data, lr_xg_rev_diff = rev_xg - lr_xg)
-
-# Finalize xG
-
-pbp_data <- select(pbp_data, -xg, -lr_xg, -xg_diff, -xg_rev_diff, -lr_xg_rev_diff)
-
-pbp_data <- rename(pbp_data, "xg" = rev_xg)
-
+pbp_data <- add_xg_data(training_data, raw_pbp_data)
 
 # GET DATES FOR 160/80/40 TEAM GAMES ###########################################
 
