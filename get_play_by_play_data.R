@@ -73,6 +73,17 @@ get_play_by_play_data <- function(game_id) {
                        goalie = player)
         goalie_ids <- goalies$goalie_id
         
+        skaters <- filter(player_data, position != "Goalie") %>%
+                mutate(position = ifelse(position == "Forward",
+                              "F",
+                              "D"))
+        
+        forwards <- filter(skaters, position == "F")
+        forwards_ids <- forwards$player_id
+        
+        defensemen <- filter(skaters, position == "D")
+        defensemen_ids <- defensemen$player_id
+        
         # Pull play-by-play data (events and coordinates)
         # Event player data is omitted here and is dealt with below
         
@@ -254,6 +265,18 @@ get_play_by_play_data <- function(game_id) {
         
         players <- left_join(players, goalies, by = "goalie_id")
         
+        # Add skater position data for event_player_1
+        
+        players <- mutate(players, event_player_1_position = case_when(
+                event_player_1_id %in% forwards_ids ~ "F",
+                event_player_1_id %in% defensemen_ids ~ "D",
+                event_player_1_id %in% goalie_ids ~ "G",
+                TRUE ~ NA))
+        
+        # Rearrange columns
+        
+        players <- select(players, c(1:3, length(players), 4:(length(players) -1)))
+        
         # Add the event players to the play-by-play data
         
         pbp_data <- bind_cols(all_plays, players) %>%
@@ -262,9 +285,28 @@ get_play_by_play_data <- function(game_id) {
         # Add a warning for long distance goals scored against a goalie
         # Potential x-coordinate error in the NHL data
         # Errors happen. If you pull all the data for the 2021-2022 and 2022-2023 seasons you will find 18 instances where this check returns a "TRUE"
-        # Note: not every instance will be an error. Sometimes goalies let in bad goals
+         
+        pbp_data <- mutate(pbp_data, goal_x_error = ifelse(
+                event_type == "GOAL" & 
+                        sa_distance > 89 & 
+                        goalie_id > 0, 
+                TRUE, 
+                FALSE))
         
-        pbp_data <- mutate(pbp_data, check_x_error = ifelse(event_type == "GOAL" & sa_distance > 89 & goalie_id > 0, TRUE, FALSE))
+        # Add a similar warning for shots
+        
+        pbp_data <- mutate(pbp_data, shot_x_error = ifelse(
+                (event_type == "SHOT" | event_type == "MISSED_SHOT") & 
+                        sa_distance > 89 & 
+                        (secondary_type == "Tip-In" |
+                                 secondary_type == "Wrap-around" |
+                                 secondary_type == "Deflected" |
+                                 secondary_type == "Poke" |
+                                 secondary_type == "Batted" |
+                                 secondary_type == "Between Legs" |
+                                 secondary_type == "Cradle"),
+                TRUE, 
+                FALSE))
         
         return(pbp_data)
 }
