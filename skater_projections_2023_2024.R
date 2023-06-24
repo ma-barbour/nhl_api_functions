@@ -1173,7 +1173,8 @@ add_xg_data <- function(training_data, pbp_data) {
         watchlist <- list(train = xgb_train, 
                           test = xgb_test)
         
-        final_xg_model <- xgboost(data = xgb_train,
+        final_xg_model <- xgb.train(data = xgb_train,
+                                  watchlist = watchlist,
                                   nrounds = 28,
                                   max.depth = 6, 
                                   objective = "binary:logistic",
