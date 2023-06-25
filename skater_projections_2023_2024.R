@@ -1465,7 +1465,9 @@ raw_pbp_data_xg_data <- bind_rows(temp_pbp_list) %>%
 # Save data locally after running the code
 # write_rds(raw_pbp_data_xg_data, "raw_pbp_data_2018_2020.RDS")
 
-##### Get the raw data: remove (potential) errors in raw play-by-play data
+##### Get the raw data: remove / fix (potential) errors in raw play-by-play data
+
+# Remove apparent x_errors
 
 raw_pbp_data$goal_x_error[is.na(raw_pbp_data$goal_x_error)] <- FALSE
 raw_pbp_data$shot_x_error[is.na(raw_pbp_data$shot_x_error)] <- FALSE
@@ -1479,6 +1481,20 @@ raw_pbp_data <- raw_pbp_data %>%
 raw_pbp_data_xg_data <- raw_pbp_data_xg_data %>%
         filter(goal_x_error == FALSE,
                shot_x_error == FALSE)
+
+# Fill shot type as "Wrist Shot" where data is NA
+
+raw_pbp_data <- mutate(raw_pbp_data, secondary_type = ifelse(
+        (event_type == "SHOT" | event_type == "GOAL") &
+                is.na(secondary_type),
+        "Wrist Shot",
+        secondary_type))
+
+raw_pbp_data_xg_data <- mutate(raw_pbp_data_xg_data, secondary_type = ifelse(
+        (event_type == "SHOT" | event_type == "GOAL") &
+                is.na(secondary_type),
+        "Wrist Shot",
+        secondary_type))
 
 ##### Get the raw data: game logs
 
