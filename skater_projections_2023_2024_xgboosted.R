@@ -1872,18 +1872,6 @@ p_assists_raw <- mutate(p_assists_raw, p_assists_raw = (p_assists_160_rate * 0.3
 
 p_assists_raw <- select(p_assists_raw, player_id, p_assists_raw)
 
-##### Projected assists (raw): alternate XGBoost model
-
-
-
-
-
-
-
-
-
-
-
 # PROJECTED SHOTS/HITS/BLOCKS (RAW) ############################################
 
 # This is simply a blend of rate stats from 160/80/40 GP
