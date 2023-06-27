@@ -14,10 +14,11 @@
 # NHL API Functions
 # Helper Functions
 # Get The Raw Data
-# Add xG To Play-By-Play Data
+# Add xGoals To Play-By-Play Data
 # Get Dates For 160/80/40 Team Games
 # Process Game Logs
 # Filter For Qualifying Skaters
+# Get on-ice xGoals data
 # Projected Goals (Raw)
 # Projected Assists (Raw)
 # Projected Shots/Hits/Blocks (Raw)
@@ -157,6 +158,235 @@ get_schedule <- function(start_date, end_date, reg_szn = "TRUE") {
         sched_dates$date <- as.Date(sched_dates$date) 
         
         return(sched_dates)
+}
+
+##### NHL API Functions: get_shift_data(game_id)
+
+get_shift_data <- function(game_id) {
+        
+        # Pull and unpack the shifts charts
+        
+        pbp_site <- read_json(paste0("https://api.nhle.com/stats/rest/en/shiftcharts?cayenneExp=gameId=", game_id))
+        
+        data <- pbp_site$data %>%
+                tibble() %>%
+                unnest_wider(1) %>%
+                arrange(period, startTime)
+        
+        # Changes times from strings to seconds
+        
+        data$endTime <- ms(data$endTime)
+        data$endTime <- period_to_seconds(data$endTime)
+        
+        data$startTime <- ms(data$startTime)
+        data$startTime <- period_to_seconds(data$startTime)
+        
+        data$duration <- ms(data$duration, quiet = TRUE)
+        data$duration <- period_to_seconds(data$duration)
+        
+        # Add shift_start in game seconds (add 1 second to start time)
+        
+        data <- mutate(data, shift_start = case_when(
+                period == 1 ~ startTime,
+                period == 2 ~ 1200 + startTime,
+                period == 3 ~ 2400 + startTime,
+                period == 4 ~ 3600 + startTime,
+                period == 5 ~ NA))
+        
+        data$shift_start <- data$shift_start +1
+        
+        # Add shift_end in game seconds
+        
+        data <- mutate(data, shift_end = case_when(
+                period == 1 ~ endTime,
+                period == 2 ~ 1200 + endTime,
+                period == 3 ~ 2400 + endTime,
+                period == 4 ~ 3600 + endTime,
+                period == 5 ~ 3900))
+        
+        data <- filter(data, shift_end > 0)
+        
+        # Create full game clock
+        
+        end_of_game <- data$shift_end[length(data$shift_end)]
+        
+        full_game_clock <- as_tibble(seq(1:as.numeric(end_of_game))) %>%
+                rename(game_seconds = value)
+        
+        full_game_clock$game_id <- unique(data$gameId)
+        
+        full_game_clock <- select(full_game_clock, c(2,1))
+        
+        # Shrink data
+        
+        data <- select(data, "player_id" = playerId, 
+                       shift_start,
+                       shift_end,
+                       duration,
+                       "team_id" = teamId) %>%
+                mutate(game_seconds = shift_start)
+        
+        # Remove duplicate and erroneous data 
+        # This will not perfectly "fix" the data in all cases
+        
+        data <- unique(data)
+        
+        data <- filter(data, player_id > 0)
+        
+        other_duplicates <- data %>%
+                select(game_seconds, player_id) %>%
+                duplicated()
+        
+        remove_rows <- which(other_duplicates == TRUE)
+        
+        rows_index <- seq_along(1:length(data$player_id))
+        rows_index_keep <- setdiff(rows_index, remove_rows)
+        
+        data <- filter(data, row_number() %in% rows_index_keep)
+        
+        # Get on-ice data (shift end indicated at shift start time)
+        
+        on_ice_data <- pivot_wider(data = data, 
+                                   names_from = player_id,
+                                   values_from = shift_end, 
+                                   id_cols = c(game_seconds),
+                                   names_prefix = "player_id_")
+        
+        # Join to full game clock
+        
+        full_game_data <- full_game_clock %>%
+                left_join(on_ice_data, by = "game_seconds")
+        
+        # Fill columns with shift end times
+        
+        full_game_data <- full_game_data %>%
+                fill(c(colnames(full_game_data)))
+        
+        # Loop through the players to set on-ice as 1/0
+        
+        for (i in (3:length(full_game_data))) {
+                
+                full_game_data[i]  = ifelse(
+                        full_game_data[i] >= full_game_data$game_seconds,
+                        1,
+                        0)
+        }
+        
+        full_game_data[is.na(full_game_data)] <- 0
+        
+        # Add total players on-ice (includes goalies)
+        
+        full_game_data <- full_game_data %>%
+                mutate(total_on_ice = rowSums(.[3:length(full_game_data)]))
+        
+        # Add players on-ice per team
+        
+        teams <- unique(data$team_id)
+        
+        team_1_data <- filter(data, team_id == teams[1])
+        
+        team_1_on_ice_data <- pivot_wider(data = team_1_data, 
+                                          names_from = player_id,
+                                          values_from = shift_end, 
+                                          id_cols = c(game_seconds),
+                                          names_prefix = "delete_")
+        
+        # Join to full game clock
+        
+        team_1_full_game_data <- full_game_clock %>%
+                left_join(team_1_on_ice_data, by = "game_seconds")
+        
+        # Fill columns with shift end times
+        
+        team_1_full_game_data <- team_1_full_game_data %>%
+                fill(c(colnames(team_1_full_game_data)))
+        
+        # Loop through the players to set on-ice as 1/0
+        
+        for (i in (3:length(team_1_full_game_data))) {
+                
+                team_1_full_game_data[i]  = ifelse(
+                        team_1_full_game_data[i] >= team_1_full_game_data$game_seconds,
+                        1,
+                        0)
+        }
+        
+        team_1_full_game_data[is.na(team_1_full_game_data)] <- 0
+        
+        # Add total players on-ice (includes goalies)
+        
+        team_1_full_game_data <- team_1_full_game_data %>%
+                mutate(!!paste0("team_id_", teams[1]) := rowSums(.[3:length(team_1_full_game_data)]))
+        
+        # Shrink columns for join
+        
+        team_1_full_game_data <- select(team_1_full_game_data, c(2,length(team_1_full_game_data)))
+        
+        # Join to full game data
+        
+        full_game_data <- full_game_data %>%
+                left_join(team_1_full_game_data, by = "game_seconds")
+        
+        # Repeat the same steps for team 2
+        
+        team_2_data <- filter(data, team_id == teams[2])
+        
+        team_2_on_ice_data <- pivot_wider(data = team_2_data, 
+                                          names_from = player_id,
+                                          values_from = shift_end, 
+                                          id_cols = c(game_seconds),
+                                          names_prefix = "delete_")
+        
+        team_2_full_game_data <- full_game_clock %>%
+                left_join(team_2_on_ice_data, by = "game_seconds")
+        
+        team_2_full_game_data <- team_2_full_game_data %>%
+                fill(c(colnames(team_2_full_game_data)))
+        
+        for (i in (3:length(team_2_full_game_data))) {
+                
+                team_2_full_game_data[i]  = ifelse(
+                        team_2_full_game_data[i] >= team_2_full_game_data$game_seconds,
+                        1,
+                        0)
+        }
+        
+        team_2_full_game_data[is.na(team_2_full_game_data)] <- 0
+        
+        team_2_full_game_data <- team_2_full_game_data %>%
+                mutate(!!paste0("team_id_", teams[2]) := rowSums(.[3:length(team_2_full_game_data)]))
+        
+        team_2_full_game_data <- select(team_2_full_game_data, c(2,length(team_2_full_game_data)))
+        
+        full_game_data <- full_game_data %>%
+                left_join(team_2_full_game_data, by = "game_seconds")
+        
+        # Replace 1/0 with player_id
+        
+        player_ids <- unique(data$player_id)
+        
+        for (i in player_ids) {
+                
+                full_game_data <- mutate_at(full_game_data,
+                                            vars(contains(as.character(i))), 
+                                            ~ ifelse(. == 1,
+                                                     i,
+                                                     0))
+        }
+        
+        # Replace player_ids in column names with sequential numbers 
+        
+        for (i in (1:length(player_ids))) {
+                
+                full_game_data <- rename_with(
+                        full_game_data,
+                        .fn = ~ str_replace(.x, 
+                                            as.character(player_ids[i]),
+                                            paste0("on_ice_", i )),
+                        .cols = ends_with(as.character(player_ids[i])))
+        }
+        
+        return(full_game_data)
 }
 
 ##### NHL API Functions: get_play_by_play_data(game_id)
@@ -451,9 +681,16 @@ get_play_by_play_data <- function(game_id) {
                 TRUE, 
                 FALSE))
         
+        
+        # Bolt on the shifts data
+        
+        on_ice_data <- get_shift_data(game_id)
+        
+        pbp_data <- pbp_data %>%
+                left_join(on_ice_data, by = c("game_id", "game_seconds"))
+        
         return(pbp_data)
 }
-
 
 ##### NHL API Functions: get_game_logs(player_id, season)
 
@@ -674,9 +911,28 @@ get_regression_data_goals <- function(pbp_data, start_date) {
         return(goals_variables)
 }
 
-##### Helper functions: get_regression_data_assists(pbp_data, start_date)
+##### Helper functions: get_regression_data_assists(pbp_data, oi_xg_data, start_date)
 
-get_regression_data_assists <- function(pbp_data, start_date) {
+get_regression_data_assists <- function(pbp_data, oi_xg_data, start_date) {
+        
+        # Start with oi_xg_data
+        # Note: this data is not a perfect match with the other data
+        # It includes ALL xG data (including empty nets)
+        # Consider changing this in the future
+        
+        oi_xg_working_data <- oi_xg_data
+        
+        # Filter data based on start_date
+        
+        oi_xg_working_data <- filter(oi_xg_working_data, date >= start_date)
+        
+        # Get on-ice xG data
+        
+        oi_xg_working_data <- oi_xg_working_data %>%
+                group_by(player_id) %>%
+                summarize(oi_xg = sum(oi_xg))
+        
+        # Now get the player's xG data from the play-by-play data
         
         working_data <- pbp_data
         
@@ -689,7 +945,26 @@ get_regression_data_assists <- function(pbp_data, start_date) {
         working_data <- filter(working_data, goalie_id > 0,
                                period != 5)
         
-        # Get regression variables
+        # Get player's xG data
+        
+        player_xG_data <- working_data %>%
+                filter(event_type == "SHOT" | event_type == "GOAL") %>%
+                group_by(event_player_1_id) %>%
+                summarize(xg = sum(xg)) %>%
+                rename("player_id" = event_player_1_id)
+        
+        # Join player xG data to on-ice xG data
+        
+        oi_xg_working_data <- oi_xg_working_data %>%
+                left_join(player_xG_data, by = "player_id")
+        
+        # Get on-ice xG data that excludes the player's contribution
+        
+        oi_xg_working_data <- oi_xg_working_data %>%
+                mutate(oi_xg_ex_player = oi_xg - xg) %>%
+                select(player_id, oi_xg_ex_player)
+        
+        # Get remaining regression variables
         
         a1_data <- filter(working_data, event_player_2_type == "Assist") %>%
                 group_by(event_player_2_id) %>%
@@ -725,7 +1000,8 @@ get_regression_data_assists <- function(pbp_data, start_date) {
                 full_join(a2_data, by = "player_id") %>%
                 full_join(a1_xg_data, by = "player_id") %>%
                 full_join(a2_xg_data, by = "player_id") %>%
-                left_join(player_position, by = "player_id")
+                left_join(player_position, by = "player_id") %>%
+                left_join(oi_xg_working_data, by = "player_id")
         
         assists_variables <- mutate(assists_variables, 
                 total_assists = primary_assists + secondary_assists,
@@ -736,7 +1012,8 @@ get_regression_data_assists <- function(pbp_data, start_date) {
                                     xg_a1, 
                                     xg_a2,
                                     proportion_primary,
-                                    position) 
+                                    position,
+                                    oi_xg_ex_player) 
         
         assists_variables$total_assists[is.na(assists_variables$total_assists)] <- 0
         assists_variables$xg_a1[is.na(assists_variables$xg_a1)] <- 0
@@ -746,6 +1023,12 @@ get_regression_data_assists <- function(pbp_data, start_date) {
         assists_variables <- filter(assists_variables, !is.na(position))
         
         assists_variables <- arrange(assists_variables, desc(total_assists))
+        
+        # Filter out players who have no on-ice xG data (effectively, limiting the pool to players in the filtered skaters list)
+        
+        assists_variables <- filter(assists_variables, oi_xg_ex_player > 0)
+        
+        # Consider exapanding all the data used in this model in the future
         
         return(assists_variables)
 }
@@ -1146,10 +1429,10 @@ add_xg_data <- function(training_data, pbp_data) {
         
         # Get nrounds parameter
         
-        set.seed(28)
-        
         watchlist <- list(train = xgb_train, 
                           test = xgb_test)
+        
+        set.seed(28)
         
         cv <- xgb.cv(params = list(objective = "binary:logistic", 
                                    eval_metric = "auc",
@@ -1395,8 +1678,8 @@ schedule <- schedule %>%
 ##### Get the raw data: play-by-play
 
 # Load the data after saving locally (below) 
-# raw_pbp_data <- read_rds("raw_pbp_data_2021_2023.RDS")
-# raw_pbp_data_xg_data <- read_rds("raw_pbp_data_2018_2020.RDS")
+# raw_pbp_data <- read_rds("raw_pbp_oi_data_2021_2023.RDS")
+# raw_pbp_data_xg_data <- read_rds("raw_pbp_oi_data_2018_2020.RDS")
 # Now skip these loops and go to "Get the raw data: remove (potential) errors in raw play-by-play data"
 
 # WARNING: THIS CODE TAKES SOME TIME TO RUN
@@ -1532,6 +1815,10 @@ training_data <- bind_rows(raw_pbp_data, raw_pbp_data_xg_data) %>%
 
 pbp_data <- add_xg_data(training_data, raw_pbp_data)
 
+# Tidy the data
+
+pbp_data <- select(pbp_data, c(1:29, 120, 30:84, 101, 119, 86:100, 102:118, 85))
+
 # GET DATES FOR 160/80/40 TEAM GAMES ###########################################
 
 date_40_gp <- schedule %>%
@@ -1596,6 +1883,69 @@ filtered_skaters <- filtered_skaters$player_id
 
 projections_base <- team_rosters %>%
         filter(player_id %in% filtered_skaters)
+
+# GET ON-ICE XGOALS DATA ###############################################
+
+# Load the data after saving locally (below) 
+# oi_xg_data <- read_rds("oi_xg_data_2021_2023.RDS")
+# Now skip to "PROJECTED GOALS (RAW)" 
+
+# WARNING: THIS CODE TAKES SOME TIME TO RUN
+
+###### Get on-ice xGoals data: prepare data
+
+game_logs_data <- raw_game_logs_data %>%
+        filter(player_id %in% filtered_skaters)
+
+pbp_data_xg_only <- pbp_data %>%
+        filter(event_type == "GOAL" | event_type == "SHOT")
+
+###### Get on-ice xGoals data: loop through play-by-play data
+
+# Loop through the game logs to get player/team data
+# Use the game logs data to find on-ice xG data in the play-by-play data
+
+temp_oi_xg_list <- list()
+
+for (i in (1:length(game_logs_data$game_id))) {
+        
+        # Isolate a game / player in the game logs
+        
+        gl_xg_working_data <- game_logs_data
+        gl_xg_working_data <- gl_xg_working_data[i,]
+        
+        gl_xg_game_id <- gl_xg_working_data[1,4]
+        gl_xg_player_id <- gl_xg_working_data[1,1]
+        gl_xg_team_id <- gl_xg_working_data[1,26]
+        gl_xg_date <- gl_xg_working_data[1,5]
+        
+        # Pull that game from the play-by_play data
+        
+        pbp_oi_xg_working_data <- filter(pbp_data_xg_only, 
+                                         game_id %in% gl_xg_game_id)
+        
+        # Find the player's on-ice xG (for)
+        
+        pbp_oi_xg_working_data <- pbp_oi_xg_working_data %>%
+                filter(event_team_id %in% gl_xg_team_id)
+        pbp_oi_xg_working_data <- pbp_oi_xg_working_data %>%
+                filter(if_any(everything(), ~ . %in% gl_xg_player_id))
+        
+        oi_xg <- sum(pbp_oi_xg_working_data$xg)
+        
+        temp_oi_xg <- tibble(gl_xg_date,
+                             gl_xg_game_id,
+                             gl_xg_player_id,
+                             oi_xg)
+        
+        temp_oi_xg_list[[i]] <- temp_oi_xg
+}
+
+oi_xg_data <- bind_rows(temp_oi_xg_list)
+oi_xg_data$oi_xg[is.na(oi_xg_data$oi_xg)] <- 0
+
+# Save data locally after running the code
+# write_rds(oi_xg_data, "oi_xg_data_2021_2023.RDS")
 
 # PROJECTED GOALS (RAW) ########################################################
 
@@ -1726,7 +2076,7 @@ p_goals_raw <- select(p_goals_raw, player_id, p_goals_raw)
 
 # Get data for building regression model
 
-reg_assists_160 <- get_regression_data_assists(pbp_data, date_160_gp)
+reg_assists_160 <- get_regression_data_assists(pbp_data, oi_xg_data, date_160_gp)
 
 # Remove player_id
 
@@ -1768,7 +2118,7 @@ set.seed(28)
 
 cv_assists <- xgb.cv(params = list(max.depth = 5,
                                    eta = 0.04,
-                                   gamma = 0.14),
+                                   gamma = 0.16),
                      data = xgb_train_assists,
                      watchlist = watchlist_assists,
                      nrounds = 1000,
@@ -1779,7 +2129,7 @@ cv_assists <- xgb.cv(params = list(max.depth = 5,
 
 xgb_model_assists <- xgb.train(params = list(max.depth = 5,
                                              eta = 0.04,
-                                             gamma = 0.14),
+                                             gamma = 0.16),
                                data = xgb_train_assists,
                                watchlist = watchlist_assists,
                                nrounds = cv_assists$best_iteration)
@@ -1813,7 +2163,7 @@ p_assists_160 <- select(p_assists_160, c(1,4))
 
 # Get regression data
 
-reg_assists_80 <- get_regression_data_assists(pbp_data, date_80_gp)
+reg_assists_80 <- get_regression_data_assists(pbp_data, oi_xg_data, date_80_gp)
 
 # Add assists predicted by regression model
 
@@ -1838,7 +2188,7 @@ p_assists_80 <- select(p_assists_80, c(1,4))
 
 # Get regression data
 
-reg_assists_40 <- get_regression_data_assists(pbp_data, date_40_gp)
+reg_assists_40 <- get_regression_data_assists(pbp_data, oi_xg_data, date_40_gp)
 
 # Add assists predicted by regression model
 
@@ -2074,7 +2424,7 @@ raw_skater_projections <- select(raw_skater_projections, -age_sos)
 
 ##### Adjustments to skater projections: adjust goals/assists (current environment)
 
-# As a proxy for recent on-ice scoring environment use: all xg data for assists from reg_assists_80 + xg on goals scored 80 GP (with a 1.5 multiplier for goals)
+# As a proxy for recent on-ice scoring environment use: oi_xg_ex_player from reg_assists_80 + xg on goals scored 80 GP (with a 1.5 multiplier for goals)
 # Give each skater a z-score based on his past scoring environment
 
 skater_xg_80gp_data <- filter(pbp_data, date > date_80_gp,
@@ -2086,14 +2436,12 @@ skater_xg_80gp_data <- filter(pbp_data, date > date_80_gp,
 skater_xg_80gp_data$xg_goals <- skater_xg_80gp_data$xg_goals * 1.5
 names(skater_xg_80gp_data)[1] <- "player_id"
 
-skater_oi_data <- select(reg_assists_80,player_id, xg_a1, xg_a2) %>%
-        mutate(xg_all = xg_a1 + xg_a2) %>%
-        select(player_id, xg_all)
+skater_oi_data <- select(reg_assists_80, player_id, oi_xg_ex_player) 
 
 skater_oi_data <- left_join(skater_oi_data, skater_xg_80gp_data, by = "player_id")
 skater_oi_data$xg_goals[is.na(skater_oi_data$xg_goals)] <- 0
 
-skater_oi_data <- mutate(skater_oi_data, xg_oi = xg_all + xg_goals)
+skater_oi_data <- mutate(skater_oi_data, xg_oi = oi_xg_ex_player + xg_goals)
 
 skater_oi_data$avg_oi <- mean(skater_oi_data$xg_oi)
 skater_oi_data$sd_oi <- mean(skater_oi_data$xg_oi)
