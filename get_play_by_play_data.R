@@ -21,7 +21,7 @@ library(parsedate)
 get_play_by_play_data <- function(game_id) {
         
         pbp_site <- read_json(paste0("https://statsapi.web.nhl.com/api/v1/game/", game_id, "/feed/live"))
-        
+
         # Get basic game data 
         
         game_data <- pbp_site$gameData %>%
@@ -67,7 +67,7 @@ get_play_by_play_data <- function(game_id) {
                 select(player_id = id,
                        player = fullName,
                        position = type,
-                       "dob" = birthDate)
+                       dob = birthDate)
         
         player_data$dob <- as_date(player_data$dob)
         
@@ -279,15 +279,18 @@ get_play_by_play_data <- function(game_id) {
         # Add date-of-birth data for event_player_1
         
         dob_data <- select(player_data,
-                           "event_player_1_id" = player_id,
-                           "event_player_1_dob" = dob)
+                           event_player_1_id = player_id,
+                           event_player_1_dob = dob)
         
         players <- players %>%
                 left_join(dob_data, by = "event_player_1_id")
         
         # Rearrange columns
         
-        players <- select(players, c(1:3, length(players) -1, length(players), 4:(length(players) -2)))
+        players <- select(players, c(1:3, 
+                                     length(players) -1, 
+                                     length(players), 
+                                     4:(length(players) -2)))
         
         # Add the event players to the play-by-play data
         
