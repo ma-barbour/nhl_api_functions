@@ -4,7 +4,7 @@
 # The projected stats are goals, assists, shots, hits, and blocks
 # Note: projections will change a little as team rosters change in the off-season
 # Raw data are pulled directly from the NHL's API
-# This script includes a simple expected goals model - enjoy
+# This script includes a simple expected goals model
 
 # TABLE OF CONTENTS ############################################################
 
@@ -916,10 +916,7 @@ get_regression_data_goals <- function(pbp_data, start_date) {
 get_regression_data_assists <- function(pbp_data, oi_xg_data, start_date) {
         
         # Start with oi_xg_data
-        # Note: this data is not a perfect match with the other data
-        # It includes ALL xG data (including empty nets)
-        # Consider changing this in the future
-        
+
         oi_xg_working_data <- oi_xg_data
         
         # Filter data based on start_date
@@ -994,6 +991,12 @@ get_regression_data_assists <- function(pbp_data, oi_xg_data, start_date) {
                         1,
                         0))
         
+        shots_data <- working_data %>%
+                filter(event_type == "SHOT" | event_type == "GOAL") %>%
+                group_by(event_player_1_id) %>%
+                summarize(shots = n()) %>%
+                rename("player_id" = event_player_1_id)
+        
         # Join and clean regression variables
         
         assists_variables <- a1_data %>%
@@ -1001,7 +1004,8 @@ get_regression_data_assists <- function(pbp_data, oi_xg_data, start_date) {
                 full_join(a1_xg_data, by = "player_id") %>%
                 full_join(a2_xg_data, by = "player_id") %>%
                 left_join(player_position, by = "player_id") %>%
-                left_join(oi_xg_working_data, by = "player_id")
+                left_join(oi_xg_working_data, by = "player_id") %>%
+                left_join(shots_data, by = "player_id")
         
         assists_variables <- mutate(assists_variables, 
                 total_assists = primary_assists + secondary_assists,
@@ -1013,7 +1017,8 @@ get_regression_data_assists <- function(pbp_data, oi_xg_data, start_date) {
                                     xg_a2,
                                     proportion_primary,
                                     position,
-                                    oi_xg_ex_player) 
+                                    oi_xg_ex_player,
+                                    shots) 
         
         assists_variables$total_assists[is.na(assists_variables$total_assists)] <- 0
         assists_variables$xg_a1[is.na(assists_variables$xg_a1)] <- 0
@@ -1028,7 +1033,7 @@ get_regression_data_assists <- function(pbp_data, oi_xg_data, start_date) {
         
         assists_variables <- filter(assists_variables, oi_xg_ex_player > 0)
         
-        # Consider exapanding all the data used in this model in the future
+        # Consider expanding all the data used in this model in the future
         
         return(assists_variables)
 }
@@ -2118,7 +2123,7 @@ set.seed(28)
 
 cv_assists <- xgb.cv(params = list(max.depth = 5,
                                    eta = 0.04,
-                                   gamma = 0.16),
+                                   gamma = 0.07),
                      data = xgb_train_assists,
                      watchlist = watchlist_assists,
                      nrounds = 1000,
@@ -2129,7 +2134,7 @@ cv_assists <- xgb.cv(params = list(max.depth = 5,
 
 xgb_model_assists <- xgb.train(params = list(max.depth = 5,
                                              eta = 0.04,
-                                             gamma = 0.16),
+                                             gamma = 0.07),
                                data = xgb_train_assists,
                                watchlist = watchlist_assists,
                                nrounds = cv_assists$best_iteration)
