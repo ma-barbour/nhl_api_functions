@@ -6,6 +6,8 @@
 # Raw data are pulled directly from the NHL's API
 # This script includes a simple expected goals model
 
+# This model has sorta turned into Frankenstein's monster. I'm working on an updated version.
+
 # TABLE OF CONTENTS ############################################################
 
 # Introduction
