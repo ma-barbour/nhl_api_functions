@@ -2490,7 +2490,7 @@ raw_skater_projections <- mutate(raw_skater_projections, es_adj_goals = ifelse(
         (p_goals_raw * 0.4) + ((p_shots_raw * shot_pct) * 0.6), 
         p_goals_raw))
 
-# Adjust goals for age > 33 at October 1, 2023 (97% of es_adj_goals)
+# Adjust goals for over age 33 at October 1, 2023 (97% of es_adj_goals)
 
 raw_skater_projections$adj_goals <- ifelse(
         raw_skater_projections$age_sos > 12419,
@@ -2501,9 +2501,16 @@ raw_skater_projections <- select(raw_skater_projections,
                                  -shot_pct, 
                                  -es_adj_goals )
 
+# Adjust goals for under age 23 at October 1, 2023 (103% of adj_goals)
+
+raw_skater_projections$adj_goals <- ifelse(
+        raw_skater_projections$age_sos < 8401,
+        (raw_skater_projections$adj_goals * 1.03), 
+        raw_skater_projections$adj_goals) 
+
 ##### ADJUSTMENTS TO SKATER PROJECTIONS: ADJUST ASSISTS/SHOTS/HITS (AGE)
 
-# Adjust remaining stats (excluding blocks) for age > 33 at October 1, 2023 (97%)
+# Adjust remaining stats (excluding blocks) for over age 33 at October 1, 2023 (97%)
 
 raw_skater_projections$adj_assists <- ifelse(
         raw_skater_projections$age_sos > 12419, 
@@ -2521,6 +2528,13 @@ raw_skater_projections$p_hits <- ifelse(
         raw_skater_projections$p_hits_raw)
 
 raw_skater_projections$p_blocks <- raw_skater_projections$p_blocks_raw 
+
+# Adjust assists for under age 23 at October 1, 2023 (103% of adj_goals)
+
+raw_skater_projections$adj_assists <- ifelse(
+        raw_skater_projections$age_sos < 8401, 
+        (raw_skater_projections$p_assists_raw * 1.03), 
+        raw_skater_projections$p_assists_raw)
 
 raw_skater_projections <- select(raw_skater_projections, -age_sos)
 
