@@ -2309,9 +2309,9 @@ p_assists_raw <- select(p_assists_raw,
 
 # PROJECTED SHOTS/HITS/BLOCKS (RAW) ############################################
 
-# Raw Shots / Hits / Blocks are predicted using a time series analysis
+# Predict raw Shots / Hits / Blocks with time series blended with previous season rate
 
-# Get game logs for last 2 seasons and convert Shots/ Hits / Blocks to rates
+# Get game logs for last 2 seasons
 
 ts_gl_data <- raw_game_logs_data %>%
         filter(season == "20222023" | season == "20212022",
@@ -2322,6 +2322,13 @@ ts_gl_data <- raw_game_logs_data %>%
                shots,
                hits,
                blocks) 
+
+# Filter out games with low time-on-ice
+
+ts_gl_data <- ts_gl_data %>%
+        filter(toi_as > 450)
+
+# Convert to rate stats
 
 ts_gl_data <- ts_gl_data %>%
         mutate(shots_rate = shots / toi_as,
@@ -2345,7 +2352,10 @@ for (i in 1:length(filtered_skaters)) {
                 filter(player_id == filtered_skaters[i]) %>%
                 arrange(date)
         
-        p_shots_model <- HoltWinters(loop_data$shots_rate,
+        p_shots_ts <- ts(loop_data$shots_rate,
+                         start = 1,
+                         frequency = 1)
+        p_shots_model <- HoltWinters(p_shots_ts,
                                    beta = FALSE,
                                    gamma = FALSE)
         p_shots_forecast <- forecast(p_shots_model, h = 1)
@@ -2353,14 +2363,20 @@ for (i in 1:length(filtered_skaters)) {
         p_shb_raw[i,1] <- filtered_skaters[i]
         p_shb_raw[i,2] <- p_shots_forecast$mean
         
-        p_hits_model <- HoltWinters(loop_data$hits_rate,
+        p_hits_ts <- ts(loop_data$hits_rate,
+                        start = 1,
+                        frequency = 1)
+        p_hits_model <- HoltWinters(p_hits_ts,
                                      beta = FALSE,
                                      gamma = FALSE)
         p_hits_forecast <- forecast(p_hits_model, h = 1)
         
         p_shb_raw[i,3] <- p_hits_forecast$mean
         
-        p_blocks_model <- HoltWinters(loop_data$blocks_rate,
+        p_blocks_ts <- ts(loop_data$blocks_rate,
+                          start = 1,
+                          frequency = 1)
+        p_blocks_model <- HoltWinters(p_blocks_ts,
                                     beta = FALSE,
                                     gamma = FALSE)
         p_blocks_forecast <- forecast(p_blocks_model, h = 1)
@@ -2369,39 +2385,32 @@ for (i in 1:length(filtered_skaters)) {
 }
 
 colnames(p_shb_raw) <- c("player_id", 
-                            "p_shots_raw", 
-                            "p_hits_raw", 
-                            "p_blocks_raw" )
+                            "p_shots", 
+                            "p_hits", 
+                            "p_blocks" )
 
-# OLD METHOD - TO BE DELETED
+# Now get simple rates for last season
 
-#p_shb_2 <- rate_stats_2 %>%
-        #select(c(1,10,11,12))
-#names(p_shb_2)[2] <- "shots_rate_2"
-#names(p_shb_2)[3] <- "hits_rate_2"
-#names(p_shb_2)[4] <- "blocks_rate_2"
+p_shb_1 <- rate_stats_1 %>%
+        select(c(1,10,11,12))
+names(p_shb_1)[2] <- "shots_rate_1"
+names(p_shb_1)[3] <- "hits_rate_1"
+names(p_shb_1)[4] <- "blocks_rate_1"
 
-#p_shb_1 <- rate_stats_1 %>%
-        #select(c(1,10,11,12))
-#names(p_shb_1)[2] <- "shots_rate_1"
-#names(p_shb_1)[3] <- "hits_rate_1"
-#names(p_shb_1)[4] <- "blocks_rate_1"
+# Join and blend the rate stats (50/50)
 
-# Join and blend the rate stats (40/60)
+p_shb_raw <- p_shb_raw %>%
+        left_join(p_shb_1, by = "player_id") 
 
-#p_shb_raw <- p_shb_2 %>%
-        #left_join(p_shb_1, by = "player_id") %>%
-        #filter(player_id %in% filtered_skaters)
+p_shb_raw <- p_shb_raw %>%
+        mutate(p_shots_raw = (shots_rate_1 * 0.6) + (p_shots * 0.4),
+               p_hits_raw = (hits_rate_1 * 0.6) + (p_hits * 0.4),
+               p_blocks_raw = (blocks_rate_1 * 0.6) + (p_blocks * 0.4))
 
-#p_shb_raw <- p_shb_raw %>%
-        #mutate(p_shots_raw = (shots_rate_2 * 0.6) + (shots_rate_1 * 0.4),
-               #p_hits_raw = (hits_rate_2 * 0.6) + (hits_rate_1 * 0.4),
-               #p_blocks_raw = (blocks_rate_2 * 0.6) + (blocks_rate_1 * 0.4))
-
-#p_shb_raw <- select(p_shb_raw, c(player_id,
-                                 #p_shots_raw,
-                                 #p_hits_raw,
-                                 #p_blocks_raw))
+p_shb_raw <- select(p_shb_raw, c(player_id,
+                                 p_shots_raw,
+                                 p_hits_raw,
+                                 p_blocks_raw))
 
 # PROJECTED TOI (RAW) ##########################################################
 
