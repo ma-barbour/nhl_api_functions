@@ -77,7 +77,7 @@ get_skater_game_logs <- function(player_id, season) {
                        pp_assists,
                        sh_goals = shorthandedGoals,
                        sh_assists,
-                       toi_s = toi)
+                       toi_as = toi)
         
         # Change home/away to "H" / "A"
         
