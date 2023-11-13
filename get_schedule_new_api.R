@@ -83,7 +83,7 @@ get_season_schedule <- function(season) {
 
 get_day_schedule <- function(day) {
         
-        schedule_site <- read_json(paste0("https://api-web.nhle.com/v1/schedule/", date))
+        schedule_site <- read_json(paste0("https://api-web.nhle.com/v1/schedule/", day))
         
         schedule <- schedule_site[["gameWeek"]] %>%
                 tibble() %>%
