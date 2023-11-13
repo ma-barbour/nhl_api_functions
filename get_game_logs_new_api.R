@@ -87,15 +87,15 @@ get_skater_game_logs <- function(player_id, season) {
         # Clean up date and TOI
         
         gl_data$date <- as.Date(gl_data$date)
-        gl_data$toi_s <- ms(gl_data$toi_s)
-        gl_data$toi_s <- period_to_seconds(gl_data$toi_s)
+        gl_data$toi_as <- ms(gl_data$toi_as)
+        gl_data$toi_as <- period_to_seconds(gl_data$toi_as)
         
         # Create rate stats (per 60 minutes)
 
         gl_data <- gl_data %>%
-                mutate(goals_60m = (goals / toi_s) * 60 * 60) %>%
-                mutate(assists_60m = (assists / toi_s) * 60 * 60) %>%
-                mutate(shots_60m = (shots / toi_s) * 60 * 60)
+                mutate(goals_60m = (goals / toi_as) * 60 * 60) %>%
+                mutate(assists_60m = (assists / toi_as) * 60 * 60) %>%
+                mutate(shots_60m = (shots / toi_as) * 60 * 60)
                 
         return(gl_data)
         
