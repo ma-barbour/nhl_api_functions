@@ -22,7 +22,7 @@ get_skater_game_logs <- function(player_id, season) {
         
         player_site <- read_json(paste0("https://api-web.nhle.com/v1/player/", player_id, "/landing"))
         
-        name <- paste(player_site[["firstName"]], player_site[["lastName"]])
+        name <- paste(player_site[["firstName"]][["default"]], player_site[["lastName"]][["default"]])
         
         # Pull and unnest the raw game log data
         
