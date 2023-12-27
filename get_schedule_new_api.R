@@ -2,11 +2,9 @@
 
 #install.packages("tidyverse")
 #install.packages("jsonlite")
-#install.packages("lubridate")
 
 library(tidyverse)
 library(jsonlite)
-library(lubridate)
 
 # FUNCTION: GET SEASON SCHEDULE ################################################
 
@@ -113,9 +111,9 @@ get_day_schedule <- function(day) {
 
 # EXAMPLES #####################################################################
 
-# Pull data for the 2022-2023 regular season
+# Pull data for the 2023-2024 regular season
 
-schedule_20222023 <- get_season_schedule("20222023")
+schedule_20232024 <- get_season_schedule("20232024")
 
 # Pull data for multiple seasons using a loop
 
