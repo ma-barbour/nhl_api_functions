@@ -7,7 +7,6 @@
 
 library(tidyverse)
 library(jsonlite)
-library(lubridate)
 library(parsedate)
 
 # FUNCTION: GET PLAY-BY-PLAY DATA ##############################################
