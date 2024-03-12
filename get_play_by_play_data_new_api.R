@@ -2,7 +2,6 @@
 
 #install.packages("tidyverse")
 #install.packages("jsonlite")
-#install.packages("lubridate")
 #install.packages("parsedate")
 
 library(tidyverse)
@@ -71,6 +70,11 @@ get_play_by_play_data <- function(game_id) {
                        away_team_id = away_team_id,
                        home_team = home_team,
                        home_team_id = home_team_id)
+        
+        # Change name of period column
+        
+        pbp_data <- pbp_data %>%
+                rename(period = number)
         
         # Convert period time to seconds and add game time
         
