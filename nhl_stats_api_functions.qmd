@@ -1,0 +1,1443 @@
+---
+title: "NHL Stats API Functions"
+format: html
+editor: visual
+execute: 
+  enabled: false
+---
+
+## Introduction
+
+This document describes functions for pulling skater stats from the NHL's API using the R programming language.
+
+My initial goal was to write a function that would quickly pull detailed time-on-ice data. I got carried away though and wrote a few new functions that will quickly pull various types of data for specified time periods.
+
+These functions omit lots of the data available through the NHL's API. My decisions about what to include were influenced by how I personally use the data (ie, trying to win my fantasy hockey leagues). If you're interested in other data it should be easy to modify these functions to get what you're looking. For example, if you want to include a skater's penalty minutes it would be easy to add that to the data selected in the peripherals function below.
+
+If you're new to the NHL's API then hopefully these functions (and the descriptive notes) will push you up the learning curve. It can be a challenge to get started as there's no documentation for the NHL's API and the data is returned in the JSON format. The functions below provide a starting point for accessing the API, but you can take this code and make it your own!
+
+Cheers,
+
+Mark
+
+## Using The NHL's API
+
+I'll start with a quick note about how to find endpoints for the NHL's stats API. You access the data using complicated URLs that request the data you're looking for. The URLs can be discovered by exploring the NHL's [stats page](https://www.nhl.com/stats/) while using your web browser's developer tools (look for the https://api.nhle.com/stats/... URL used to request the data being displayed on the page). **However, there's an important trick for pulling [all]{.underline} the relevant data**: set the limit (found in the text of the URL) to "-1" rather than the default setting of "50".
+
+I'll also note that there are other types of data available through the NHL's API, including detailed play-by-play data. I have additional functions for pulling other data on [GitHub](https://github.com/ma-barbour/nhl_api_functions) (and this document is also available on there).
+
+## Setup
+
+To start, load the necessary packages (install them first if necessary).
+
+```{r}
+
+#install.packages("tidyverse")
+#install.packages("jsonlite")
+
+library(tidyverse)
+library(jsonlite)
+
+```
+
+## Functions To Get Data
+
+Set out below are functions that pull the following types of data from the NHL's stats API:
+
+-   time-on-ice and shift data;
+
+-   scoring data (goals/assists); and
+
+-   so-called "peripherals" data (shots/hits/blocks).
+
+The functions will return data about game states and, in the case of scoring data, will also return limited on-ice data.
+
+### Time-On-Ice \[Seasons\]
+
+This function pulls time-on-ice data for the specified seasons (regular season only).
+
+The arguments for the function are:
+
+-   season_start: an integer specifying the first season (for example: 20222023);
+
+-   season_end: an integer specifying the last season (for example: 20232024);
+
+-   aggregate_data: a TRUE/FALSE logical specifying whether to sum the data from all seasons \[default setting is FALSE\]; and
+
+-   rounding: a TRUE/FALSE logical specifying whether continuous numeric data (excluding proportions) should be rounded to the nearest whole number \[default setting is TRUE\].
+
+To pull data for a single season simply specify the same season for "start" and "end".
+
+The data returned by the function are:
+
+-   player_id (integer);
+
+-   player (character \[name\]);
+
+-   season (integer \[returned only when data are not aggregated\]);
+
+-   position (character \[F/D\]);
+
+-   games_played (integer);
+
+-   toi_total (integer \[seconds\]);
+
+-   toi_gp (numeric \[seconds\]);
+
+-   toi_shift (numeric \[seconds\]);
+
+-   shifts (integer);
+
+-   shifts_gp (numeric);
+
+-   toi_es_total (integer \[seconds \| even strength\]);
+
+-   toi_es_gp (numeric);
+
+-   toi_pp_total (integer \[seconds \| power play\]);
+
+-   toi_pp_gp (numeric);
+
+-   toi_sh_total (integer \[seconds \| shorthanded\]);
+
+-   toi_sh_gp (numeric);
+
+-   toi_ot_total (integer \[seconds \| overtime\]);
+
+-   toi_ot_per_ot_gp (numeric \[per overtime game played\]);
+
+-   proportion_es (numeric \[toi_es_total / toi_total\]);
+
+-   proportion_pp (numeric \[toi_pp_total / toi_total\]);
+
+-   proportion_sh (numeric \[toi_sh_total / toi_total\]); and
+
+-   proportion_ot (numeric \[toi_ot_total / toi_total\]).
+
+Here is the function:
+
+```{r}
+
+get_toi_seasons <- function(season_start, season_end, aggregate_data = FALSE, rounding = TRUE) {
+        
+        # Prepare the aggregate_data argument
+        
+        agg_data_arg <- if_else(aggregate_data == FALSE, "false", "true")
+        
+        # Get the JSON data
+        
+        toi_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/timeonice?isAggregate=", agg_data_arg,"&isGame=false&sort=%5B%7B%22property%22:%22timeOnIce%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameTypeId=2%20and%20seasonId%3C=", season_end, "%20and%20seasonId%3E=", season_start) 
+        
+        toi_stats_site <- read_json(toi_stats_url)
+        
+        toi_stats_data <- toi_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        toi_stats_data <- toi_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        # seasonId is selected only if aggregate_data == FALSE
+        
+        if(aggregate_data == FALSE) {
+                
+                toi_stats_data <- toi_stats_data |>
+                        select(player_id = playerId,
+                               player = skaterFullName,
+                               season = seasonId,
+                               position = positionCode,
+                               games_played = gamesPlayed,
+                               toi_total = timeOnIce,
+                               toi_gp = timeOnIcePerGame,
+                               toi_shift = timeOnIcePerShift,
+                               shifts,
+                               shifts_gp = shiftsPerGame,
+                               toi_es_total = evTimeOnIce,
+                               toi_es_gp = evTimeOnIcePerGame,
+                               toi_pp_total = ppTimeOnIce,
+                               toi_pp_gp = ppTimeOnIcePerGame,
+                               toi_sh_total = shTimeOnIce,
+                               toi_sh_gp = shTimeOnIcePerGame,
+                               toi_ot_total = otTimeOnIce,
+                               toi_ot_per_ot_gp = otTimeOnIcePerOtGame)
+                
+        } else {
+                
+                toi_stats_data <- toi_stats_data |>
+                        select(player_id = playerId,
+                               player = skaterFullName,
+                               position = positionCode,
+                               games_played = gamesPlayed,
+                               toi_total = timeOnIce,
+                               toi_gp = timeOnIcePerGame,
+                               toi_shift = timeOnIcePerShift,
+                               shifts,
+                               shifts_gp = shiftsPerGame,
+                               toi_es_total = evTimeOnIce,
+                               toi_es_gp = evTimeOnIcePerGame,
+                               toi_pp_total = ppTimeOnIce,
+                               toi_pp_gp = ppTimeOnIcePerGame,
+                               toi_sh_total = shTimeOnIce,
+                               toi_sh_gp = shTimeOnIcePerGame,
+                               toi_ot_total = otTimeOnIce,
+                               toi_ot_per_ot_gp = otTimeOnIcePerOtGame)
+                
+        }
+        
+        # Change position to F/D
+        
+        toi_stats_data$position <- if_else(toi_stats_data$position == "D", "D", "F")
+        
+        # Fill NAs in OT data with 0s
+        
+        toi_stats_data$toi_ot_per_ot_gp[is.na(toi_stats_data$toi_ot_per_ot_gp)] <- 0
+        
+        # Arrange data by descending TOI/GP
+        
+        toi_stats_data <- toi_stats_data |>
+                arrange(desc(toi_gp))
+        
+        # Add proportion of total TOI that is ES, PP, SH, OT
+        
+        toi_stats_data <- toi_stats_data |>
+                mutate(proportion_es = round(toi_es_total / toi_total,3),
+                       proportion_pp = round(toi_pp_total / toi_total,3),
+                       proportion_sh = round(toi_sh_total / toi_total,3),
+                       proportion_ot = round(toi_ot_total / toi_total,3))
+        
+        # Apply the rounding argument
+        
+        if(rounding == TRUE) {
+                
+                toi_stats_data <- toi_stats_data |>
+                        mutate(across(ends_with(c("_gp", "_shift")), round))
+                
+        }
+        
+        return(toi_stats_data)
+}
+
+```
+
+#### Examples
+
+```{r}
+
+# Single season with defualt settings [2022-2023]
+
+example_toi_1 <- get_toi_seasons(season_start = 20222023,
+                                 season_end = 20222023)
+
+# Two seasons without aggregating the data [2022-2024]
+
+example_toi_2 <- get_toi_seasons(season_start = 20222023,
+                                 season_end = 20232024, 
+                                 aggregate_data = FALSE, 
+                                 rounding = TRUE)
+
+# Three seasons with aggregating the data and without rounding [2021-2024]
+
+example_toi_3 <- get_toi_seasons(season_start = 20212022,
+                                 season_end = 20232024, 
+                                 aggregate_data = TRUE, 
+                                 rounding = FALSE)
+
+```
+
+### Time-On-Ice \[Dates\]
+
+This function pulls time-on-ice data for the specified date range (regular season only).
+
+The arguments for the function are:
+
+-   date_start: a character string (YEAR-MONTH-DAY) specifying the first date (for example: "2023-01-01");
+
+-   date_end: a character string (YEAR-MONTH-DAY) specifying the last date (for example: "2024-04-18"); and
+
+-   rounding: a TRUE/FALSE logical specifying whether continuous numeric data (excluding proportions) should be rounded to the nearest whole number \[default setting is TRUE\].
+
+Data spanning multiple seasons are always aggregated.
+
+The data returned by the function are:
+
+-   player_id (integer);
+
+-   player (character \[name\]);
+
+-   position (character \[F/D\]);
+
+-   games_played (integer);
+
+-   toi_total (integer \[seconds\]);
+
+-   toi_gp (numeric \[seconds\]);
+
+-   toi_shift (numeric \[seconds\]);
+
+-   shifts (integer);
+
+-   shifts_gp (numeric);
+
+-   toi_es_total (integer \[seconds \| even strength\]);
+
+-   toi_es_gp (numeric);
+
+-   toi_pp_total (integer \[seconds \| power play\]);
+
+-   toi_pp_gp (numeric);
+
+-   toi_sh_total (integer \[seconds \| shorthanded\]);
+
+-   toi_sh_gp (numeric);
+
+-   toi_ot_total (integer \[seconds \| overtime\]);
+
+-   toi_ot_per_ot_gp (numeric \[per overtime game played\]);
+
+-   proportion_es (numeric \[toi_es_total / toi_total\]);
+
+-   proportion_pp (numeric \[toi_pp_total / toi_total\]);
+
+-   proportion_sh (numeric \[toi_sh_total / toi_total\]); and
+
+-   proportion_ot (numeric \[toi_ot_total / toi_total\]).
+
+Here is the function:
+
+```{r}
+
+get_toi_dates <- function(date_start, date_end, rounding = TRUE) {
+        
+        # Get the JSON data
+        
+        toi_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/timeonice?isAggregate=true&isGame=true&sort=%5B%7B%22property%22:%22timeOnIce%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameDate%3C=%22", date_end, "%2023%3A59%3A59%22%20and%20gameDate%3E=%22", date_start, "%22%20and%20gameTypeId=2") 
+        
+        toi_stats_site <- read_json(toi_stats_url)
+        
+        toi_stats_data <- toi_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        toi_stats_data <- toi_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        toi_stats_data <- toi_stats_data |>
+                select(player_id = playerId,
+                       player = skaterFullName,
+                       position = positionCode,
+                       games_played = gamesPlayed,
+                       toi_total = timeOnIce,
+                       toi_gp = timeOnIcePerGame,
+                       toi_shift = timeOnIcePerShift,
+                       shifts,
+                       shifts_gp = shiftsPerGame,
+                       toi_es_total = evTimeOnIce,
+                       toi_es_gp = evTimeOnIcePerGame,
+                       toi_pp_total = ppTimeOnIce,
+                       toi_pp_gp = ppTimeOnIcePerGame,
+                       toi_sh_total = shTimeOnIce,
+                       toi_sh_gp = shTimeOnIcePerGame,
+                       toi_ot_total = otTimeOnIce,
+                       toi_ot_per_ot_gp = otTimeOnIcePerOtGame)
+        
+        # Change position to F/D
+        
+        toi_stats_data$position <- if_else(toi_stats_data$position == "D", "D", "F")
+        
+        # Fill NAs in OT data with 0s
+        
+        toi_stats_data$toi_ot_per_ot_gp[is.na(toi_stats_data$toi_ot_per_ot_gp)] <- 0
+        
+        # Arrange data by descending TOI/GP
+        
+        toi_stats_data <- toi_stats_data |>
+                arrange(desc(toi_gp))
+        
+        # Add proportion of total TOI that is ES, PP, SH, OT
+        
+        toi_stats_data <- toi_stats_data |>
+                mutate(proportion_es = round(toi_es_total / toi_total,3),
+                       proportion_pp = round(toi_pp_total / toi_total,3),
+                       proportion_sh = round(toi_sh_total / toi_total,3),
+                       proportion_ot = round(toi_ot_total / toi_total,3))
+        
+        # Apply the rounding argument
+        
+        if(rounding == TRUE) {
+                
+                toi_stats_data <- toi_stats_data |>
+                        mutate(across(ends_with(c("_gp", "_shift")), round))
+                
+        }
+        
+        return(toi_stats_data)
+        
+}
+
+```
+
+#### Examples
+
+```{r}
+
+example_toi_4 <- get_toi_dates(date_start = "2023-01-01",
+                               date_end = "2024-04-18",
+                               rounding = TRUE)
+
+```
+
+### Scoring \[Seasons\]
+
+This function pulls scoring data for the specified seasons (regular season only).
+
+The arguments for the function are:
+
+-   season_start: an integer specifying the first season (for example: 20222023); and
+
+-   season_end: an integer specifying the last season (for example: 20232024).
+
+To pull data for a single season simply specify the same season for "start" and "end". Data spanning multiple seasons are always aggregated.
+
+The data returned by the function are:
+
+-   player_id (integer);
+
+-   player (character \[name\]);
+
+-   position (character \[F/D\]);
+
+-   goals (integer);
+
+-   assists (integer);
+
+-   points (integer);
+
+-   es_goals (integer \[even strength data\]);
+
+-   es_goals_proportion (numeric);
+
+-   es_assists (integer);
+
+-   es_assists_proportion (numeric);
+
+-   es_points (integer);
+
+-   es_points_proportion (numeric);
+
+-   pp_goals (integer \[power play data\]);
+
+-   pp_goals_proportion (numeric);
+
+-   pp_assists (integer);
+
+-   pp_assists_proportion (numeric);
+
+-   pp_points (integer);
+
+-   pp_points_proportion (numeric);
+
+-   sh_goals (integer \[shorthanded data\]);
+
+-   sh_goals_proportion (numeric);
+
+-   sh_assists (integer);
+
+-   sh_assists_proportion (numeric);
+
+-   sh_points (integer);
+
+-   sh_points_proportion (numeric);
+
+-   ot_goals (integer \[overtime data\]);
+
+-   ot_goals_proportion (numeric);
+
+-   oi_es_goals_for (integer \[on-ice data\]);
+
+-   oi_pp_goals_for (integer);
+
+-   oi_sh_goals_for (integer);
+
+-   oi_es_gf_xskater (integer \[on-ice data excluding the skater\]);
+
+-   oi_pp_gf_xskater (integer);
+
+-   oi_sh_gf_xskater (integer);
+
+-   primary_assists (integer \[all strengths data\]);
+
+-   secondary_assists (integer);
+
+-   primary_a_proportion (numeric \[a1 / total assists\]);
+
+-   pp_primary_assists (integer \[power play data\]);
+
+-   pp_secondary_assists (integer);
+
+-   pp_primary_a_proportion (numeric \[pp_a1 / pp assists\]);
+
+-   en_goals (integer \[empty net data\]); and
+
+-   en_assists (integer).
+
+Data for time-on-ice and games played are not returned by this function. Detailed TOI data can be pulled using the dedicated function (above) and then joined with this scoring data. From there, detailed rate stats can be computed as desired.
+
+Here is the function:
+
+```{r}
+
+get_scoring_seasons <- function(season_start, season_end) {
+        
+        # Get the summary JSON data
+        
+        scoring_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/summary?isAggregate=true&isGame=false&sort=%5B%7B%22property%22:%22points%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22goals%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22assists%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameTypeId=2%20and%20seasonId%3C=", season_end, "%20and%20seasonId%3E=", season_start) 
+        scoring_stats_site <- read_json(scoring_stats_url)
+        
+        scoring_stats_data <- scoring_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        scoring_stats_data <- scoring_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        scoring_stats_data <- scoring_stats_data |>
+                select(player_id = playerId,
+                       player = skaterFullName,
+                       position = positionCode,
+                       goals,
+                       assists,
+                       points,
+                       es_goals = evGoals,
+                       es_points = evPoints,
+                       pp_goals = ppGoals,
+                       pp_points = ppPoints,
+                       sh_goals = shGoals,
+                       sh_points = shPoints,
+                       ot_goals = otGoals)
+        
+        # Add missing assists
+        
+        scoring_stats_data <- scoring_stats_data |>
+                mutate(es_assists = es_points - es_goals, .after = es_goals) |>
+                mutate(pp_assists = pp_points - pp_goals, .after = pp_goals) |>
+                mutate(sh_assists = sh_points - sh_goals, .after = sh_goals)
+        
+        # Add proportions 
+        
+        scoring_stats_data <- scoring_stats_data |>
+                mutate(es_goals_proportion = es_goals / goals, .after = es_goals) |>
+                mutate(pp_goals_proportion = pp_goals / goals, .after = pp_goals) |>
+                mutate(sh_goals_proportion = sh_goals / goals, .after = sh_goals) |>
+                mutate(ot_goals_proportion = ot_goals / goals, .after = ot_goals) |>
+                mutate(es_assists_proportion = es_assists / assists, .after = es_assists) |>
+                mutate(pp_assists_proportion = pp_assists / assists, .after = pp_assists) |>
+                mutate(sh_assists_proportion = sh_assists / assists, .after = sh_assists) |>
+                mutate(es_points_proportion = es_points / points, .after = es_points) |>
+                mutate(pp_points_proportion = pp_points / points, .after = pp_points) |>
+                mutate(sh_points_proportion = sh_points / points, .after = sh_points)
+        
+        # Change position to F/D
+        
+        scoring_stats_data$position <- if_else(scoring_stats_data$position == "D", "D", "F")
+        
+        # Arrange data by descending points
+        
+        scoring_stats_data <- scoring_stats_data |>
+                arrange(desc(points))
+        
+        # Add on-ice goals-for data
+        # Get the JSON data
+        
+        oi_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/goalsForAgainst?isAggregate=true&isGame=false&sort=%5B%7B%22property%22:%22evenStrengthGoalDifference%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameTypeId=2%20and%20seasonId%3C=", season_end, "%20and%20seasonId%3E=", season_start) 
+        
+        oi_stats_site <- read_json(oi_stats_url)
+        
+        oi_stats_data <- oi_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        oi_stats_data <- oi_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        oi_stats_data <- oi_stats_data |>
+                select(player_id = playerId,
+                       oi_es_goals_for = evenStrengthGoalsFor,
+                       oi_pp_goals_for = powerPlayGoalFor,
+                       oi_sh_goals_for = shortHandedGoalsFor)
+        
+        # Join the on-ice data to the general scoring data
+        
+        scoring_stats_data <- scoring_stats_data |>
+                left_join(oi_stats_data, by = "player_id")
+        
+        # Fill the NAs with 0s
+        
+        scoring_stats_data[is.na(scoring_stats_data)] <- 0
+        
+        # Add on-ice data excluding the skater's own goals
+        
+        scoring_stats_data <- scoring_stats_data |>
+                mutate(oi_es_gf_xskater = oi_es_goals_for - es_goals,
+                       oi_pp_gf_xskater = oi_pp_goals_for - pp_goals,
+                       oi_sh_gf_xskater = oi_sh_goals_for - sh_goals)
+        
+        # Add A1/A2 data [all strengths and power play]
+        # Get the JSON data
+        
+        a1_a2_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/scoringpergame?isAggregate=true&isGame=false&sort=%5B%7B%22property%22:%22pointsPerGame%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22goalsPerGame%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameTypeId=2%20and%20seasonId%3C=", season_end, "%20and%20seasonId%3E=", season_start)
+        
+        a1_a2_stats_site <- read_json(a1_a2_stats_url)
+        
+        a1_a2_stats_data <- a1_a2_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        a1_a2_stats_data <- a1_a2_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        a1_a2_stats_data <- a1_a2_stats_data |>
+                select(player_id = playerId,
+                       assists,
+                       primary_assists = totalPrimaryAssists,
+                       secondary_assists = totalSecondaryAssists) |>
+                mutate(primary_a_proportion = primary_assists / assists) |>
+                select(-assists)
+        
+        # Join the A1/A2 data to the general scoring data
+        
+        scoring_stats_data <- scoring_stats_data |>
+                left_join(a1_a2_stats_data, by = "player_id")
+        
+        # Repeat for power play A1/A2 data
+        # Get the JSON data
+        
+        a1_a2_pp_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/powerplay?isAggregate=true&isGame=false&sort=%5B%7B%22property%22:%22ppTimeOnIce%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameTypeId=2%20and%20seasonId%3C=", season_end, "%20and%20seasonId%3E=", season_start) 
+        
+        a1_a2_pp_stats_site <- read_json(a1_a2_pp_stats_url)
+        
+        a1_a2_pp_stats_data <- a1_a2_pp_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        a1_a2_pp_stats_data <- a1_a2_pp_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        a1_a2_pp_stats_data <- a1_a2_pp_stats_data |>
+                select(player_id = playerId,
+                       ppAssists,
+                       pp_primary_assists = ppPrimaryAssists,
+                       pp_secondary_assists = ppSecondaryAssists) |>
+                mutate(pp_primary_a_proportion = pp_primary_assists / ppAssists) |>
+                select(-ppAssists)
+        
+        # Join the A1/A2 pp data to the general scoring data
+        
+        scoring_stats_data <- scoring_stats_data |>
+                left_join(a1_a2_pp_stats_data, by = "player_id")
+        
+        # Add empty net data
+        # Get the JSON data
+        
+        en_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/realtime?isAggregate=true&isGame=false&sort=%5B%7B%22property%22:%22hits%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameTypeId=2%20and%20seasonId%3C=", season_end, "%20and%20seasonId%3E=", season_start)
+        
+        en_stats_site <- read_json(en_stats_url)
+        
+        en_stats_data <- en_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        en_stats_data <- en_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        en_stats_data <- en_stats_data |>
+                select(player_id = playerId,
+                       en_goals = emptyNetGoals,
+                       en_assists = emptyNetAssists) 
+        
+        # Join the empty net data to the general scoring data
+        
+        scoring_stats_data <- scoring_stats_data |>
+                left_join(en_stats_data, by = "player_id")
+        
+        # Fill the NAs with 0s
+        
+        scoring_stats_data[is.na(scoring_stats_data)] <- 0
+        
+        return(scoring_stats_data)
+}
+
+```
+
+#### Examples
+
+```{r}
+
+example_scoring_1 <- get_scoring_seasons(season_start = 20222023,
+                                         season_end = 20232024)
+
+```
+
+### Scoring \[Dates\]
+
+This function pulls scoring data for the specified date range (regular season only).
+
+The arguments for the function are:
+
+-   date_start: a character string (YEAR-MONTH-DAY) specifying the first date (for example: "2023-01-01"); and
+
+-   date_end: a character string (YEAR-MONTH-DAY) specifying the last date (for example: "2024-04-18").
+
+Data spanning multiple seasons are always aggregated.
+
+The data returned by the function are:
+
+-   player_id (integer);
+
+-   player (character \[name\]);
+
+-   position (character \[F/D\]);
+
+-   goals (integer);
+
+-   assists (integer);
+
+-   points (integer);
+
+-   es_goals (integer \[even strength data\]);
+
+-   es_goals_proportion (numeric);
+
+-   es_assists (integer);
+
+-   es_assists_proportion (numeric);
+
+-   es_points (integer);
+
+-   es_points_proportion (numeric);
+
+-   pp_goals (integer \[power play data\]);
+
+-   pp_goals_proportion (numeric);
+
+-   pp_assists (integer);
+
+-   pp_assists_proportion (numeric);
+
+-   pp_points (integer);
+
+-   pp_points_proportion (numeric);
+
+-   sh_goals (integer \[shorthanded data\]);
+
+-   sh_goals_proportion (numeric);
+
+-   sh_assists (integer);
+
+-   sh_assists_proportion (numeric);
+
+-   sh_points (integer);
+
+-   sh_points_proportion (numeric);
+
+-   ot_goals (integer \[overtime data\]);
+
+-   ot_goals_proportion (numeric);
+
+-   oi_es_goals_for (integer \[on-ice data\]);
+
+-   oi_pp_goals_for (integer);
+
+-   oi_sh_goals_for (integer);
+
+-   oi_es_gf_xskater (integer \[on-ice data excluding the skater\]);
+
+-   oi_pp_gf_xskater (integer);
+
+-   oi_sh_gf_xskater (integer);
+
+-   primary_assists (integer \[all strengths data\]);
+
+-   secondary_assists (integer);
+
+-   primary_a_proportion (numeric \[a1 / total assists\]);
+
+-   pp_primary_assists (integer \[power play data\]);
+
+-   pp_secondary_assists (integer);
+
+-   pp_primary_a_proportion (numeric \[pp_a1 / pp assists\]);
+
+-   en_goals (integer \[empty net data\]); and
+
+-   en_assists (integer).
+
+Data for time-on-ice and games played are not returned by this function. Detailed TOI data can be pulled using the dedicated function (above) and then joined with this scoring data. From there, detailed rate stats can be computed as desired.
+
+Here is the function:
+
+```{r}
+
+get_scoring_dates <- function(date_start, date_end) {
+        
+        # Get the summary JSON data
+        
+        scoring_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/summary?isAggregate=true&isGame=true&sort=%5B%7B%22property%22:%22points%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22goals%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22assists%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameDate%3C=%22", date_end, "%2023%3A59%3A59%22%20and%20gameDate%3E=%22", date_start, "%22%20and%20gameTypeId=2") 
+        
+        scoring_stats_site <- read_json(scoring_stats_url)
+        
+        scoring_stats_data <- scoring_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        scoring_stats_data <- scoring_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        scoring_stats_data <- scoring_stats_data |>
+                select(player_id = playerId,
+                       player = skaterFullName,
+                       position = positionCode,
+                       goals,
+                       assists,
+                       points,
+                       es_goals = evGoals,
+                       es_points = evPoints,
+                       pp_goals = ppGoals,
+                       pp_points = ppPoints,
+                       sh_goals = shGoals,
+                       sh_points = shPoints,
+                       ot_goals = otGoals)
+        
+        # Add missing assists
+        
+        scoring_stats_data <- scoring_stats_data |>
+                mutate(es_assists = es_points - es_goals, .after = es_goals) |>
+                mutate(pp_assists = pp_points - pp_goals, .after = pp_goals) |>
+                mutate(sh_assists = sh_points - sh_goals, .after = sh_goals)
+        
+        # Add proportions 
+        
+        scoring_stats_data <- scoring_stats_data |>
+                mutate(es_goals_proportion = es_goals / goals, .after = es_goals) |>
+                mutate(pp_goals_proportion = pp_goals / goals, .after = pp_goals) |>
+                mutate(sh_goals_proportion = sh_goals / goals, .after = sh_goals) |>
+                mutate(ot_goals_proportion = ot_goals / goals, .after = ot_goals) |>
+                mutate(es_assists_proportion = es_assists / assists, .after = es_assists) |>
+                mutate(pp_assists_proportion = pp_assists / assists, .after = pp_assists) |>
+                mutate(sh_assists_proportion = sh_assists / assists, .after = sh_assists) |>
+                mutate(es_points_proportion = es_points / points, .after = es_points) |>
+                mutate(pp_points_proportion = pp_points / points, .after = pp_points) |>
+                mutate(sh_points_proportion = sh_points / points, .after = sh_points)
+        
+        # Change position to F/D
+        
+        scoring_stats_data$position <- if_else(scoring_stats_data$position == "D", "D", "F")
+        
+        # Arrange data by descending points
+        
+        scoring_stats_data <- scoring_stats_data |>
+                arrange(desc(points))
+        
+        # Add on-ice goals-for data
+        # Get the JSON data
+        
+        oi_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/goalsForAgainst?isAggregate=true&isGame=true&sort=%5B%7B%22property%22:%22evenStrengthGoalDifference%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameDate%3C=%22", date_end, "%2023%3A59%3A59%22%20and%20gameDate%3E=%22", date_start, "%22%20and%20gameTypeId=2") 
+        
+        oi_stats_site <- read_json(oi_stats_url)
+        
+        oi_stats_data <- oi_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        oi_stats_data <- oi_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        oi_stats_data <- oi_stats_data |>
+                select(player_id = playerId,
+                       oi_es_goals_for = evenStrengthGoalsFor,
+                       oi_pp_goals_for = powerPlayGoalFor,
+                       oi_sh_goals_for = shortHandedGoalsFor)
+        
+        # Join the on-ice data to the general scoring data
+        
+        scoring_stats_data <- scoring_stats_data |>
+                left_join(oi_stats_data, by = "player_id")
+        
+        # Fill the NAs with 0s
+        
+        scoring_stats_data[is.na(scoring_stats_data)] <- 0
+        
+        # Add on-ice data excluding the skater's own goals
+        
+        scoring_stats_data <- scoring_stats_data |>
+                mutate(oi_es_gf_xskater = oi_es_goals_for - es_goals,
+                       oi_pp_gf_xskater = oi_pp_goals_for - pp_goals,
+                       oi_sh_gf_xskater = oi_sh_goals_for - sh_goals)
+        
+        # Add A1/A2 data [all strengths and power play]
+        # Get the JSON data
+        
+        a1_a2_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/scoringpergame?isAggregate=true&isGame=true&sort=%5B%7B%22property%22:%22pointsPerGame%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22goalsPerGame%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameDate%3C=%22", date_end, "%2023%3A59%3A59%22%20and%20gameDate%3E=%22", date_start, "%22%20and%20gameTypeId=2")
+        
+        a1_a2_stats_site <- read_json(a1_a2_stats_url)
+        
+        a1_a2_stats_data <- a1_a2_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        a1_a2_stats_data <- a1_a2_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        a1_a2_stats_data <- a1_a2_stats_data |>
+                select(player_id = playerId,
+                       assists,
+                       primary_assists = totalPrimaryAssists,
+                       secondary_assists = totalSecondaryAssists) |>
+                mutate(primary_a_proportion = primary_assists / assists) |>
+                select(-assists)
+        
+        # Join the A1/A2 data to the general scoring data
+        
+        scoring_stats_data <- scoring_stats_data |>
+                left_join(a1_a2_stats_data, by = "player_id")
+        
+        # Repeat for power play A1/A2 data
+        # Get the JSON data
+        
+        a1_a2_pp_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/powerplay?isAggregate=true&isGame=true&sort=%5B%7B%22property%22:%22ppTimeOnIce%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameDate%3C=%22", date_end, "%2023%3A59%3A59%22%20and%20gameDate%3E=%22", date_start, "%22%20and%20gameTypeId=2") 
+        
+        a1_a2_pp_stats_site <- read_json(a1_a2_pp_stats_url)
+        
+        a1_a2_pp_stats_data <- a1_a2_pp_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        a1_a2_pp_stats_data <- a1_a2_pp_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        a1_a2_pp_stats_data <- a1_a2_pp_stats_data |>
+                select(player_id = playerId,
+                       ppAssists,
+                       pp_primary_assists = ppPrimaryAssists,
+                       pp_secondary_assists = ppSecondaryAssists) |>
+                mutate(pp_primary_a_proportion = pp_primary_assists / ppAssists) |>
+                select(-ppAssists)
+        
+        # Join the A1/A2 pp data to the general scoring data
+        
+        scoring_stats_data <- scoring_stats_data |>
+                left_join(a1_a2_pp_stats_data, by = "player_id")
+        
+        # Add empty net data
+        # Get the JSON data
+        
+        en_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/realtime?isAggregate=true&isGame=true&sort=%5B%7B%22property%22:%22hits%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameDate%3C=%22", date_end, "%2023%3A59%3A59%22%20and%20gameDate%3E=%22", date_start, "%22%20and%20gameTypeId=2")
+        
+        en_stats_site <- read_json(en_stats_url)
+        
+        en_stats_data <- en_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        en_stats_data <- en_stats_data |>
+                tibble() %>%
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        en_stats_data <- en_stats_data |>
+                select(player_id = playerId,
+                       en_goals = emptyNetGoals,
+                       en_assists = emptyNetAssists) 
+        
+        # Join the empty net data to the general scoring data
+        
+        scoring_stats_data <- scoring_stats_data |>
+                left_join(en_stats_data, by = "player_id")
+        
+        # Fill the NAs with 0s
+        
+        scoring_stats_data[is.na(scoring_stats_data)] <- 0
+        
+        return(scoring_stats_data)
+}
+
+```
+
+#### Examples
+
+```{r}
+
+example_scoring_2 <- get_scoring_dates(date_start = "2023-01-01",
+                                       date_end = "2024-04-18")
+
+```
+
+### Peripherals \[Seasons\]
+
+This function pulls "peripherals" data (shots/hits/blocks) for the specified seasons (regular season only).
+
+The arguments for the function are:
+
+-   season_start: an integer specifying the first season (for example: 20222023); and
+
+-   season_end: an integer specifying the last season (for example: 20232024).
+
+To pull data for a single season simply specify the same season for "start" and "end". Data spanning multiple seasons are always aggregated.
+
+The data returned by the function are:
+
+-   player_id (integer);
+
+-   player (character \[name\]);
+
+-   position (character \[F/D\]);
+
+-   shots (integer);
+
+-   hits (integer);
+
+-   blocks (integer);
+
+-   es_shots (integer \[even strength data\])
+
+-   pp_shots (integer \[power play data\]);
+
+-   sh_shots (integer \[shorthanded data\]);
+
+-   es_shots_proportion (numeric \[es_shots / shots\]);
+
+-   pp_shots_proportion (numeric \[pp_shots / shots\]); and
+
+-   sh_shots_proportion (numeric \[sh_shots / shots\]).
+
+Data for time-on-ice and games played are not returned by this function. Detailed TOI data can be pulled using the dedicated function (above) and then joined with this scoring data. From there, detailed rate stats can be computed as desired.
+
+Here is the function:
+
+```{r}
+
+get_peripherals_seasons <- function(season_start, season_end) {
+        
+        # Get the JSON data
+        
+        peripheral_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/scoringpergame?isAggregate=true&isGame=false&sort=%5B%7B%22property%22:%22pointsPerGame%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22goalsPerGame%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameTypeId=2%20and%20seasonId%3C=", season_end, "%20and%20seasonId%3E=", season_start) 
+        
+        peripheral_stats_site <- read_json(peripheral_stats_url)
+        
+        peripheral_stats_data <- peripheral_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                select(player_id = playerId,
+                       player = skaterFullName,
+                       position = positionCode,
+                       shots,
+                       hits,
+                       blocks = blockedShots)
+        
+        # Change position to F/D
+        
+        peripheral_stats_data$position <- if_else(peripheral_stats_data$position == "D", "D", "F")
+        
+        # Arrange data by descending shots
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                arrange(desc(shots))
+        
+        # Add power play data
+        # Get the JSON data
+        
+        pp_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/powerplay?isAggregate=true&isGame=false&sort=%5B%7B%22property%22:%22ppTimeOnIce%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameTypeId=2%20and%20seasonId%3C=", season_end, "%20and%20seasonId%3E=", season_start)
+        
+        pp_stats_site <- read_json(pp_stats_url)
+        
+        pp_stats_data <- pp_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        pp_stats_data <- pp_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        pp_stats_data <- pp_stats_data |>
+                select(player_id = playerId,
+                       pp_shots = ppShots) 
+        
+        # Join the power play data to the peripherals data
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                left_join(pp_stats_data, by = "player_id")
+        
+        # Add shorthanded data
+        # Get the JSON data
+        
+        sh_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/penaltykill?isAggregate=true&isGame=false&sort=%5B%7B%22property%22:%22shTimeOnIce%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameTypeId=2%20and%20seasonId%3C=", season_end, "%20and%20seasonId%3E=", season_start)
+        
+        sh_stats_site <- read_json(sh_stats_url)
+        
+        sh_stats_data <- sh_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        sh_stats_data <- sh_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        sh_stats_data <- sh_stats_data |>
+                select(player_id = playerId,
+                       sh_shots = shShots) 
+        
+        # Join the shorthanded data to the peripherals data
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                left_join(sh_stats_data, by = "player_id")
+        
+        # Add even strength shots
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                mutate(es_shots = shots - (pp_shots + sh_shots),
+                       .before = pp_shots)
+        
+        # Add proportions for shots
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                mutate(es_shots_proportion = round(es_shots / shots, 3),
+                       pp_shots_proportion = round(pp_shots / shots, 3),
+                       sh_shots_proportion = round(sh_shots / shots, 3))
+        
+        # Fill NAs with 0s 
+        
+        peripheral_stats_data[is.na(peripheral_stats_data)] <- 0
+        
+        return(peripheral_stats_data)
+        
+}
+
+```
+
+#### Examples
+
+```{r}
+
+example_peripherals_1 <- get_peripherals_seasons(season_start = 20222023,
+                                                 season_end = 20232024)
+
+```
+
+### Peripherals \[Dates\]
+
+This function pulls "peripherals" data (shots/hits/blocks) for the specified date range (regular season only).
+
+The arguments for the function are:
+
+-   date_start: a character string (YEAR-MONTH-DAY) specifying the first date (for example: "2023-01-01"); and
+
+-   date_end: a character string (YEAR-MONTH-DAY) specifying the last date (for example: "2024-04-18").
+
+Data spanning multiple seasons are always aggregated.
+
+The data returned by the function are:
+
+-   player_id (integer);
+
+-   player (character \[name\]);
+
+-   position (character \[F/D\]);
+
+-   shots (integer);
+
+-   hits (integer);
+
+-   blocks (integer);
+
+-   es_shots (integer \[even strength data\])
+
+-   pp_shots (integer \[power play data\]);
+
+-   sh_shots (integer \[shorthanded data\]);
+
+-   es_shots_proportion (numeric \[es_shots / shots\]);
+
+-   pp_shots_proportion (numeric \[pp_shots / shots\]); and
+
+-   sh_shots_proportion (numeric \[sh_shots / shots\]).
+
+Data for time-on-ice and games played are not returned by this function. Detailed TOI data can be pulled using the dedicated function (above) and then joined with this scoring data. From there, detailed rate stats can be computed as desired.
+
+Here is the function:
+
+```{r}
+
+get_peripherals_dates <- function(date_start, date_end) {
+        
+        # Get the JSON data
+        
+        peripheral_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/scoringpergame?isAggregate=true&isGame=true&sort=%5B%7B%22property%22:%22pointsPerGame%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22goalsPerGame%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameDate%3C=%22", date_end, "%2023%3A59%3A59%22%20and%20gameDate%3E=%22", date_start, "%22%20and%20gameTypeId=2") 
+        
+        peripheral_stats_site <- read_json(peripheral_stats_url)
+        
+        peripheral_stats_data <- peripheral_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                select(player_id = playerId,
+                       player = skaterFullName,
+                       position = positionCode,
+                       shots,
+                       hits,
+                       blocks = blockedShots)
+        
+        # Change position to F/D
+        
+        peripheral_stats_data$position <- if_else(peripheral_stats_data$position == "D", "D", "F")
+        
+        # Arrange data by descending shots
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                arrange(desc(shots))
+        
+        # Add power play data
+        # Get the JSON data
+        
+        pp_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/powerplay?isAggregate=true&isGame=true&sort=%5B%7B%22property%22:%22ppTimeOnIce%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameDate%3C=%22", date_end, "%2023%3A59%3A59%22%20and%20gameDate%3E=%22", date_start, "%22%20and%20gameTypeId=2")
+        
+        pp_stats_site <- read_json(pp_stats_url)
+        
+        pp_stats_data <- pp_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        pp_stats_data <- pp_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        pp_stats_data <- pp_stats_data |>
+                select(player_id = playerId,
+                       pp_shots = ppShots) 
+        
+        # Join the power play data to the peripherals data
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                left_join(pp_stats_data, by = "player_id")
+        
+        # Add shorthanded data
+        # Get the JSON data
+        
+        sh_stats_url <- paste0("https://api.nhle.com/stats/rest/en/skater/penaltykill?isAggregate=true&isGame=true&sort=%5B%7B%22property%22:%22shTimeOnIce%22,%22direction%22:%22DESC%22%7D,%7B%22property%22:%22playerId%22,%22direction%22:%22ASC%22%7D%5D&start=0&limit=-1&cayenneExp=gameDate%3C=%22", date_end, "%2023%3A59%3A59%22%20and%20gameDate%3E=%22", date_start, "%22%20and%20gameTypeId=2")
+        
+        sh_stats_site <- read_json(sh_stats_url)
+        
+        sh_stats_data <- sh_stats_site[["data"]]
+        
+        # Unnest the JSON data
+        
+        sh_stats_data <- sh_stats_data |>
+                tibble() |>
+                unnest_wider(1)
+        
+        # Select and rename the desired columns
+        
+        sh_stats_data <- sh_stats_data |>
+                select(player_id = playerId,
+                       sh_shots = shShots) 
+        
+        # Join the shorthanded data to the peripherals data
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                left_join(sh_stats_data, by = "player_id")
+        
+        # Add even strength shots
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                mutate(es_shots = shots - (pp_shots + sh_shots),
+                       .before = pp_shots)
+        
+        # Add proportions for shots
+        
+        peripheral_stats_data <- peripheral_stats_data |>
+                mutate(es_shots_proportion = round(es_shots / shots, 3),
+                       pp_shots_proportion = round(pp_shots / shots, 3),
+                       sh_shots_proportion = round(sh_shots / shots, 3))
+        
+        # Fill NAs with 0s 
+        
+        peripheral_stats_data[is.na(peripheral_stats_data)] <- 0
+        
+        return(peripheral_stats_data)
+        
+}
+
+```
+
+#### Examples
+
+```{r}
+
+example_peripherals_2 <- get_peripherals_dates(date_start = "2022-10-01",
+                                               date_end = "2024-04-18")
+
+```
+
+## Joining The Data
+
+It is easy to join the time-on-ice data with the scoring data (and the peripherals data) by keeping these points in mind:
+
+-   join by player_id;
+
+-   player names and position appear in both data sets - remove them from one set prior to the join; and
+
+-   **it is very important to ensure both data sets cover the same time period**.
+
+Here are two functions that will help pull and join the data (while ensuring that the time periods match). One function is for specified seasons and the other function is for a specified date range.
+
+### Functions
+
+These helper functions use "first" and "last" instead of "start" and "end". For example, the *first_season* argument corresponds to the *season_start* argument in the get_toi_seasons function.
+
+These helper functions have a TRUE/FALSE logical argument that will add peripherals (shots/hits/blocks) to the returned data. The default setting is TRUE.
+
+The helper functions automatically aggregate all data.
+
+#### Get Joined Seasons Data
+
+```{r}
+
+get_seasons_data_joined <- function(first_season, last_season, incl_peripherals = TRUE) {
+        
+        toi_data <- get_toi_seasons(season_start = first_season,
+                                    season_end = last_season,
+                                    aggregate_data = TRUE,
+                                    rounding = TRUE)
+        
+        scoring_data <- get_scoring_seasons(season_start = first_season,
+                                            season_end = last_season)
+        
+        joined_data <- toi_data |>
+                left_join(scoring_data |> select(-c(player, position)), 
+                          by = "player_id") |>
+                arrange(desc(points))
+        
+        if(incl_peripherals == TRUE) {
+                
+                peripherals_data <- get_peripherals_seasons(season_start = first_season,
+                                                            season_end = last_season)
+                
+                joined_data <- joined_data |>
+                        left_join(peripherals_data |> select(-c(player, position)), 
+                                  by = "player_id")
+                
+        }
+        
+        return(joined_data)
+        
+}
+
+```
+
+#### Get Joined Dates Data
+
+```{r}
+
+get_dates_data_joined <- function(first_date, last_date, incl_peripherals = TRUE) {
+        
+        toi_data <- get_toi_dates(date_start = first_date,
+                                  date_end = last_date)
+        
+        scoring_data <- get_scoring_dates(date_start = first_date,
+                                          date_end = last_date)
+        
+        joined_data <- toi_data |>
+                left_join(scoring_data |> select(-c(player, position)), 
+                          by = "player_id") |>
+                arrange(desc(points))
+        
+        if(incl_peripherals == TRUE) {
+                
+                peripherals_data <- get_peripherals_dates(date_start = first_date,
+                                                          date_end = last_date)
+                
+                joined_data <- joined_data |>
+                        left_join(peripherals_data |> select(-c(player, position)), 
+                                  by = "player_id")
+                
+        }
+        
+        return(joined_data)
+        
+}
+
+```
+
+#### Examples
+
+```{r}
+
+example_joined_seasons_1 <- get_seasons_data_joined(first_season = 20222023,
+                                                    last_season = 20232024,
+                                                    incl_peripherals = TRUE)
+
+example_joined_seasons_2 <- get_seasons_data_joined(first_season = 20222023,
+                                                    last_season = 20232024,
+                                                    incl_peripherals = FALSE)
+
+example_joined_dates_1 <- get_dates_data_joined(first_date = "2022-10-01",
+                                                last_date = "2024-04-20",
+                                                incl_peripherals = TRUE) 
+
+example_joined_dates_2 <- get_dates_data_joined(first_date = "2022-10-01",
+                                                last_date = "2024-04-20",
+                                                incl_peripherals = FALSE) 
+
+```
